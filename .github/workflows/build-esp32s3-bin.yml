@@ -14,6 +14,22 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Restore required ESP-IDF components
+        shell: bash
+        run: |
+          if [ ! -f components/boards/CMakeLists.txt ]; then
+            echo "components directory is missing; restoring it from official v0.1.29 source"
+            git clone --depth 1 --branch v0.1.29 \
+              https://github.com/rbouteiller/airplay-esp32.git \
+              "$RUNNER_TEMP/airplay-esp32-upstream"
+            mkdir -p components
+            cp -a "$RUNNER_TEMP/airplay-esp32-upstream/components/." components/
+          fi
+
+          test -f components/boards/CMakeLists.txt
+          test -f components/dac/CMakeLists.txt
+          test -f components/audio-resampler/CMakeLists.txt
+
       - name: Build with ESP-IDF 5.5
         uses: espressif/esp-idf-ci-action@v1
         with:
