@@ -7,24 +7,21 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  build-esp32s3:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Build firmware with ESP-IDF 5.5
+      - name: Build with ESP-IDF 5.5
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5
           target: esp32s3
           command: >
-            idf.py
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3"
-            build &&
-            cp build/airplay2-receiver.bin
-            airplay2-receiver-esp32s3-v0.3.00-ota.bin &&
+            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build &&
+            cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin &&
             cd build &&
             esptool.py --chip esp32s3 merge_bin --format raw
             -o ../airplay2-receiver-esp32s3-v0.3.00-install.bin
@@ -35,12 +32,13 @@ jobs:
             airplay2-receiver-esp32s3-v0.3.00-ota.bin
             > SHA256SUMS-v0.3.00.txt
 
-      - name: Upload BIN files
-        uses: actions/upload-artifact@v4
+      - name: Upload installation files
+        uses: actions/upload-artifact@v6
         with:
           name: airplay-esp32s3-v0.3.00-bin-files
           path: |
             airplay2-receiver-esp32s3-v0.3.00-install.bin
             airplay2-receiver-esp32s3-v0.3.00-ota.bin
             SHA256SUMS-v0.3.00.txt
+          if-no-files-found: error
           retention-days: 30
