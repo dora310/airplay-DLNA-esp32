@@ -24,7 +24,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Check formatting
-        run: scripts/format.sh --check
+        run: bash scripts/format.sh --check
 
   lint-check:
     runs-on: ubuntu-latest
