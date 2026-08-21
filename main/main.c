@@ -36,9 +36,6 @@
 
 static const char *TAG = "main";
 
-// AP mode IP address (192.168.4.1 in network byte order)
-#define AP_IP_ADDR 0x0104A8C0
-
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
 
@@ -123,7 +120,7 @@ static void network_monitor_task(void *pvParameters) {
 
   // Start captive portal DNS if no network yet
   if (dns_running) {
-    dns_server_start(AP_IP_ADDR);
+    dns_server_start(WIFI_PROVISIONING_IP_ADDR);
   }
 
   while (1) {
@@ -165,7 +162,7 @@ static void network_monitor_task(void *pvParameters) {
       }
     } else {
       if (!dns_running) {
-        dns_server_start(AP_IP_ADDR);
+        dns_server_start(WIFI_PROVISIONING_IP_ADDR);
         dns_running = true;
       }
     }
@@ -284,10 +281,12 @@ void app_main(void) {
     // Wait for initial WiFi connection if credentials exist
     if (settings_has_wifi_credentials()) {
       if (!wifi_wait_connected(30000)) {
-        ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://192.168.4.1");
+        ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://"
+                      WIFI_PROVISIONING_IP_STR);
       }
     } else {
-      ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://192.168.4.1");
+      ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://"
+                    WIFI_PROVISIONING_IP_STR);
     }
   } else {
     ESP_LOGI(TAG, "Ethernet connected — skipping WiFi");
