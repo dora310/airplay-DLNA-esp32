@@ -33,7 +33,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_ota_ops.h"
 
 static const char *TAG = "main";
 
@@ -42,21 +41,6 @@ static const char *TAG = "main";
 
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
-
-static void confirm_ota_task(void *arg) {
-  (void)arg;
-  /* Give networking and the AirPlay listeners time to prove they can start. */
-  vTaskDelay(pdMS_TO_TICKS(30000));
-#ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-  if (s_airplay_started && (wifi_is_connected() || ethernet_is_connected())) {
-    esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
-    ESP_LOGI(TAG, "OTA health confirmation: %s", esp_err_to_name(result));
-  } else {
-    ESP_LOGE(TAG, "OTA image not confirmed; bootloader may roll back");
-  }
-#endif
-  vTaskDelete(NULL);
-}
 
 static void on_airplay_dlna_event(rtsp_event_t event,
                                   const rtsp_event_data_t *data,
@@ -243,9 +227,6 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
-  ESP_ERROR_CHECK(software_dsp_init(44100));
-  ESP_ERROR_CHECK(source_manager_init());
-  ESP_ERROR_CHECK(system_monitor_init());
   spiffs_storage_init();
   log_stream_init();
   ESP_ERROR_CHECK(playback_control_init());
@@ -312,9 +293,26 @@ void app_main(void) {
     ESP_LOGI(TAG, "Ethernet connected — skipping WiFi");
   }
 
+  /* WiFi/setup AP is boot-critical.  Optional v0.3 services are deliberately
+     initialized only after networking has started, and must never abort the
+     captive-portal boot path. */
+  err = software_dsp_init(44100);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Software DSP unavailable: %s", esp_err_to_name(err));
+  }
+  err = source_manager_init();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Source manager unavailable: %s", esp_err_to_name(err));
+  }
+  err = system_monitor_init();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "System monitor unavailable: %s", esp_err_to_name(err));
+  }
+
   // Start services that work on any interface
   ESP_ERROR_CHECK(web_server_start(80));
-  esp_err_t dlna_err = dlna_renderer_register(web_server_get_handle(), 80);
+  esp_err_t dlna_err =
+      dlna_renderer_register(web_server_get_handle(), 80);
   if (dlna_err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
   }
@@ -330,7 +328,10 @@ void app_main(void) {
   bool connected = eth_available || wifi_is_connected();
   if (connected) {
     start_airplay_services();
-    ESP_ERROR_CHECK(optional_backends_init());
+    err = optional_backends_init();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Optional backends unavailable: %s", esp_err_to_name(err));
+    }
   }
 
 #ifdef CONFIG_BT_A2DP_ENABLE
@@ -348,7 +349,6 @@ void app_main(void) {
 #endif
 
   buttons_init();
-  xTaskCreate(confirm_ota_task, "ota_confirm", 2048, NULL, 2, NULL);
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(10000));
