@@ -32,6 +32,7 @@ static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
+static bool s_has_credentials = false;
 static bool s_bssid_set = false;
 static esp_timer_handle_t s_retry_timer = NULL;
 static SemaphoreHandle_t s_scan_mutex = NULL;
@@ -79,7 +80,8 @@ void wifi_set_hostname(const char *device_name) {
 }
 
 static void retry_timer_callback(void *arg) {
-  if (!s_sta_connected) {
+  (void)arg;
+  if (s_has_credentials && !s_sta_connected) {
     ESP_LOGI(TAG, "Retry timer fired, reconnecting (attempt %d)...",
              s_retry_num + 1);
     esp_wifi_connect();
@@ -87,6 +89,9 @@ static void retry_timer_callback(void *arg) {
 }
 
 static void schedule_retry(void) {
+  if (!s_has_credentials) {
+    return;
+  }
   // Exponential backoff: 5s, 10s, 20s, 30s (max)
   int delay_s = 5;
   if (s_retry_num > AP_REENABLE_THRESHOLD) {
@@ -115,9 +120,18 @@ static void enable_ap_mode(void) {
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    if (!s_has_credentials) {
+      ESP_LOGI(TAG,
+               "No saved WiFi credentials; setup AP remains available");
+      return;
+    }
     // Defer scan+connect to a separate task — the blocking scan uses too
     // much stack to run inside the sys_evt event loop (2–4 KB).
-    xTaskCreate(scan_and_connect_task, "wifi_scan", 4096, NULL, 3, NULL);
+    if (xTaskCreate(scan_and_connect_task, "wifi_scan", 4096, NULL, 3,
+                    NULL) != pdPASS) {
+      ESP_LOGW(TAG, "Could not start best-AP scan; connecting directly");
+      esp_wifi_connect();
+    }
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_sta_connected = false;
@@ -179,12 +193,20 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 // One-shot task: scan for best AP then connect — runs outside the event loop
 // to avoid overflowing the sys_evt stack.
 static void scan_and_connect_task(void *arg) {
+  (void)arg;
   wifi_config_t cfg;
-  if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK &&
-      strlen((char *)cfg.sta.ssid) > 0) {
-    wifi_select_best_ap((char *)cfg.sta.ssid);
+  if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK ||
+      strlen((char *)cfg.sta.ssid) == 0) {
+    ESP_LOGI(TAG, "Station connection skipped: SSID is not configured");
+    vTaskDelete(NULL);
+    return;
   }
-  esp_wifi_connect();
+  wifi_select_best_ap((char *)cfg.sta.ssid);
+  esp_err_t err = esp_wifi_connect();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Initial WiFi connection failed to start: %s",
+             esp_err_to_name(err));
+  }
   vTaskDelete(NULL);
 }
 
@@ -259,6 +281,12 @@ static void wifi_init_base(void) {
 
   s_wifi_event_group = xEventGroupCreate();
   s_scan_mutex = xSemaphoreCreateMutex();
+  if (!s_wifi_event_group) {
+    ESP_LOGE(TAG, "Failed to allocate WiFi event group");
+  }
+  if (!s_scan_mutex) {
+    ESP_LOGW(TAG, "WiFi scan mutex unavailable; web scans will be disabled");
+  }
 
   esp_err_t ret = esp_netif_init();
   if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
@@ -308,19 +336,21 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   // Configure STA
   char ssid[33] = {0};
   char password[65] = {0};
-  bool has_credentials = false;
+  s_has_credentials = false;
 
   if (settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK &&
       settings_get_wifi_password(password, sizeof(password)) == ESP_OK &&
       strlen(ssid) > 0) {
-    has_credentials = true;
+    s_has_credentials = true;
   }
 
   wifi_config_t sta_config = {0};
   strlcpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid));
   strlcpy((char *)sta_config.sta.password, password,
           sizeof(sta_config.sta.password));
-  sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  sta_config.sta.threshold.authmode =
+      s_has_credentials && strlen(password) > 0 ? WIFI_AUTH_WPA2_PSK
+                                                : WIFI_AUTH_OPEN;
 
   // Configure AP and save for later re-enable
   const char *default_ssid = ap_ssid ? ap_ssid : CONFIG_DEFAULT_AP_SSID;
@@ -350,8 +380,10 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   ESP_ERROR_CHECK(esp_wifi_start());
 
   ESP_LOGI(TAG, "AP+STA mode started: AP SSID=%s", default_ssid);
-  if (has_credentials) {
+  if (s_has_credentials) {
     ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
+  } else {
+    ESP_LOGI(TAG, "Provisioning mode active at http://192.168.4.1");
   }
 }
 
@@ -404,8 +436,7 @@ esp_err_t wifi_scan(wifi_ap_record_t **ap_list, uint16_t *ap_count) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  if (!s_scan_mutex ||
-      xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+  if (!s_scan_mutex || xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
   }
 
@@ -469,6 +500,7 @@ void wifi_stop(void) {
     esp_wifi_deinit();
     s_wifi_initialized = false;
     s_sta_connected = false;
+    s_has_credentials = false;
     s_retry_num = 0;
     if (s_wifi_event_group) {
       xEventGroupClearBits(s_wifi_event_group,
