@@ -314,8 +314,7 @@ void app_main(void) {
 
   // Start services that work on any interface
   ESP_ERROR_CHECK(web_server_start(80));
-  esp_err_t dlna_err =
-      dlna_renderer_register(web_server_get_handle(), 80);
+  esp_err_t dlna_err = dlna_renderer_register(web_server_get_handle(), 80);
   if (dlna_err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
   }
