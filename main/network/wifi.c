@@ -11,6 +11,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "lwip/ip4_addr.h"
 
 #include "wifi.h"
 #include "settings.h"
