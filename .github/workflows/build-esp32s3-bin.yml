@@ -9,6 +9,7 @@ permissions:
 jobs:
   build-esp32s3:
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -39,10 +40,10 @@ jobs:
             rm -f sdkconfig sdkconfig.old
             rm -rf build
             idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build
-            grep -q 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' sdkconfig
-            grep -q 'CONFIG_ESPTOOLPY_FLASHFREQ_80M=y' sdkconfig
-            grep -q 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' sdkconfig
-            grep -q 'CONFIG_DEFAULT_AP_SSID="ESP32-AirPlay-Setup"' sdkconfig
+            grep -F 'CONFIG_ESPTOOLPY_FLASHMODE="dio"' sdkconfig
+            grep -F 'CONFIG_ESPTOOLPY_FLASHFREQ="80m"' sdkconfig
+            grep -F 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' sdkconfig
+            grep -F 'CONFIG_DEFAULT_AP_SSID="ESP32-AirPlay-Setup"' sdkconfig
             cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin
             cd build
             esptool.py --chip esp32s3 merge_bin --format raw \
@@ -65,4 +66,5 @@ jobs:
             SHA256SUMS-v0.3.00.txt
             build/flash_args
             build/flasher_args.json
+          if-no-files-found: error
           retention-days: 30
