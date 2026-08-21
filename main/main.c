@@ -227,15 +227,6 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
-  #ifdef CONFIG_BOARD_ESP32S3_GENERIC
-    ESP_LOGI(TAG, "Starting boot-critical WiFi provisioning...");
-
-    esp_err_t wifi_err = wifi_init_apsta(NULL, NULL);
-    if (wifi_err != ESP_OK) {
-        ESP_LOGE(TAG, "FATAL: WiFi provisioning failed: %s",
-                 esp_err_to_name(wifi_err));
-    }
-#endif
   spiffs_storage_init();
   log_stream_init();
   ESP_ERROR_CHECK(playback_control_init());

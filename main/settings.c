@@ -257,8 +257,8 @@ esp_err_t settings_set_wifi_credentials(const char *ssid,
 }
 
 bool settings_has_wifi_credentials(void) {
-  char ssid[MAX_WIFI_SSID_LEN + 1];
-  return settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK;
+  char ssid[MAX_WIFI_SSID_LEN + 1] = {0};
+  return settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK && ssid[0] != '\0';
 }
 
 esp_err_t settings_get_device_name(char *name, size_t len) {
@@ -461,27 +461,23 @@ esp_err_t settings_set_web_password(const char *password) {
   }
   nvs_handle_t nvs;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
-  if (err != ESP_OK)
-    return err;
+  if (err != ESP_OK) return err;
   if (!password[0]) {
     err = nvs_erase_key(nvs, NVS_KEY_WEB_PASSWORD);
-    if (err == ESP_ERR_NVS_NOT_FOUND)
-      err = ESP_OK;
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
   } else {
     uint8_t digest[32];
     password_digest(password, digest);
     err = nvs_set_blob(nvs, NVS_KEY_WEB_PASSWORD, digest, sizeof(digest));
   }
-  if (err == ESP_OK)
-    err = nvs_commit(nvs);
+  if (err == ESP_OK) err = nvs_commit(nvs);
   nvs_close(nvs);
   return err;
 }
 
 bool settings_web_password_is_set(void) {
   nvs_handle_t nvs;
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK)
-    return false;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return false;
   size_t size = 0;
   esp_err_t err = nvs_get_blob(nvs, NVS_KEY_WEB_PASSWORD, NULL, &size);
   nvs_close(nvs);
@@ -489,22 +485,17 @@ bool settings_web_password_is_set(void) {
 }
 
 bool settings_verify_web_password(const char *password) {
-  if (!settings_web_password_is_set())
-    return true;
-  if (!password)
-    return false;
+  if (!settings_web_password_is_set()) return true;
+  if (!password) return false;
   uint8_t expected[32], actual[32];
   size_t size = sizeof(expected);
   nvs_handle_t nvs;
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK)
-    return false;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return false;
   esp_err_t err = nvs_get_blob(nvs, NVS_KEY_WEB_PASSWORD, expected, &size);
   nvs_close(nvs);
-  if (err != ESP_OK || size != sizeof(expected))
-    return false;
+  if (err != ESP_OK || size != sizeof(expected)) return false;
   password_digest(password, actual);
   uint8_t difference = 0;
-  for (size_t i = 0; i < sizeof(expected); i++)
-    difference |= expected[i] ^ actual[i];
+  for (size_t i = 0; i < sizeof(expected); i++) difference |= expected[i] ^ actual[i];
   return difference == 0;
 }
