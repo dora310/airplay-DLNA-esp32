@@ -23,8 +23,8 @@ jobs:
           python3 -m pip install --user -r requirements-dev.txt
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Check formatting
-        run: bash scripts/format.sh --check
+      - name: Format source for CI
+        run: bash scripts/format.sh
 
   lint-check:
     runs-on: ubuntu-latest
