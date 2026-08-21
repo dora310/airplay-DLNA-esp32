@@ -9,7 +9,6 @@ permissions:
 jobs:
   build-esp32s3:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -35,18 +34,26 @@ jobs:
         with:
           esp_idf_version: v5.5
           target: esp32s3
-          command: >
-            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build &&
-            cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin &&
-            cd build &&
-            esptool.py --chip esp32s3 merge_bin --format raw
-            -o ../airplay2-receiver-esp32s3-v0.3.00-install.bin
-            $(cat flash_args) &&
-            cd .. &&
-            sha256sum
-            airplay2-receiver-esp32s3-v0.3.00-install.bin
-            airplay2-receiver-esp32s3-v0.3.00-ota.bin
-            > SHA256SUMS-v0.3.00.txt
+          command: |
+            set -eu
+            rm -f sdkconfig sdkconfig.old
+            rm -rf build
+            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build
+            grep -q 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' sdkconfig
+            grep -q 'CONFIG_ESPTOOLPY_FLASHFREQ_80M=y' sdkconfig
+            grep -q 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' sdkconfig
+            grep -q 'CONFIG_DEFAULT_AP_SSID="ESP32-AirPlay-Setup"' sdkconfig
+            cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin
+            cd build
+            esptool.py --chip esp32s3 merge_bin --format raw \
+              -o ../airplay2-receiver-esp32s3-v0.3.00-install.bin \
+              $(cat flash_args)
+            cd ..
+            python3 -c "from pathlib import Path; b=Path('airplay2-receiver-esp32s3-v0.3.00-install.bin').read_bytes(); assert b[0] == 0xE9 and b[2] == 2, 'installation image is not ESP32 DIO mode'"
+            sha256sum \
+              airplay2-receiver-esp32s3-v0.3.00-install.bin \
+              airplay2-receiver-esp32s3-v0.3.00-ota.bin \
+              > SHA256SUMS-v0.3.00.txt
 
       - name: Upload installation files
         uses: actions/upload-artifact@v6
@@ -56,5 +63,6 @@ jobs:
             airplay2-receiver-esp32s3-v0.3.00-install.bin
             airplay2-receiver-esp32s3-v0.3.00-ota.bin
             SHA256SUMS-v0.3.00.txt
-          if-no-files-found: error
+            build/flash_args
+            build/flasher_args.json
           retention-days: 30
