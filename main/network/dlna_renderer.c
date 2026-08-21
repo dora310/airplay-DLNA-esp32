@@ -33,6 +33,9 @@
 #define DLNA_SSDP_PORT          1900
 #define DLNA_NOTIFY_SECONDS     900
 #define DLNA_PLAYER_STACK_SIZE  10240
+#define DLNA_SSDP_STACK_SIZE    8192
+#define DLNA_SSDP_PACKET_SIZE   1536
+#define DLNA_SSDP_MESSAGE_SIZE  896
 #define DLNA_SERVER_NAME        "ESP32/5.5 UPnP/1.0 AirPlayDLNA/0.3.00"
 
 typedef enum {
@@ -89,10 +92,8 @@ static const char *RENDERING_SCPD =
     "<action><name>GetVolume</name></action><action><name>SetVolume</name>"
     "</action><action><name>GetMute</name></action><action><name>SetMute</name>"
     "</action></actionList><serviceStateTable>"
-    "<stateVariable "
-    "sendEvents=\"yes\"><name>Volume</name><dataType>ui2</dataType>"
-    "<allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</"
-    "step>"
+    "<stateVariable sendEvents=\"yes\"><name>Volume</name><dataType>ui2</dataType>"
+    "<allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step>"
     "</allowedValueRange></stateVariable></serviceStateTable></scpd>";
 
 static const char *CONNECTION_SCPD =
@@ -118,7 +119,8 @@ static const char *state_name(void) {
 }
 
 static void current_ip(char *out, size_t out_len) {
-  if (ethernet_is_connected() && ethernet_get_ip_str(out, out_len) == ESP_OK) {
+  if (ethernet_is_connected() &&
+      ethernet_get_ip_str(out, out_len) == ESP_OK) {
     return;
   }
   if (wifi_get_ip_str(out, out_len) != ESP_OK) {
@@ -159,8 +161,7 @@ static esp_err_t device_xml_handler(httpd_req_t *req) {
       "xmlns=\"urn:schemas-upnp-org:device-1-0\"><specVersion><major>1</major>"
       "<minor>0</minor></specVersion><URLBase>http://%s:%u/</URLBase><device>"
       "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
-      "<friendlyName>%s (DLNA)</friendlyName><manufacturer>ESP32 "
-      "AirPlay</manufacturer>"
+      "<friendlyName>%s (DLNA)</friendlyName><manufacturer>ESP32 AirPlay</manufacturer>"
       "<modelName>AirPlay 2 and DLNA Receiver</modelName>"
       "<modelNumber>0.3.00-all-software-dev</modelNumber><UDN>%s</UDN>"
       "<serviceList><service><serviceType>%s</serviceType>"
@@ -231,11 +232,8 @@ static bool xml_value(const char *body, const char *tag, char *out,
   struct {
     const char *entity;
     char value;
-  } entities[] = {{"&amp;", '&'},
-                  {"&lt;", '<'},
-                  {"&gt;", '>'},
-                  {"&quot;", '"'},
-                  {"&apos;", '\''}};
+  } entities[] = {{"&amp;", '&'},  {"&lt;", '<'},   {"&gt;", '>'},
+                  {"&quot;", '"'}, {"&apos;", '\''}};
   for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]); i++) {
     char *p;
     while ((p = strstr(out, entities[i].entity)) != NULL) {
@@ -249,8 +247,8 @@ static bool xml_value(const char *body, const char *tag, char *out,
 
 static const char *soap_action(httpd_req_t *req, const char *body) {
   static char action[64];
-  if (httpd_req_get_hdr_value_str(req, "SOAPACTION", action, sizeof(action)) ==
-      ESP_OK) {
+  if (httpd_req_get_hdr_value_str(req, "SOAPACTION", action,
+                                   sizeof(action)) == ESP_OK) {
     char *hash = strrchr(action, '#');
     if (hash) {
       char *end = strpbrk(hash + 1, "\"' ");
@@ -280,14 +278,13 @@ static esp_err_t soap_response(httpd_req_t *req, const char *service,
   if (!xml) {
     return httpd_resp_send_500(req);
   }
-  snprintf(
-      xml, 4096,
-      "<?xml version=\"1.0\"?><s:Envelope "
-      "xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-      "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-      "<s:Body><u:%sResponse xmlns:u=\"urn:schemas-upnp-org:service:%s:1\">"
-      "%s</u:%sResponse></s:Body></s:Envelope>",
-      action, service, arguments ? arguments : "", action);
+  snprintf(xml, 4096,
+           "<?xml version=\"1.0\"?><s:Envelope "
+           "xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+           "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+           "<s:Body><u:%sResponse xmlns:u=\"urn:schemas-upnp-org:service:%s:1\">"
+           "%s</u:%sResponse></s:Body></s:Envelope>",
+           action, service, arguments ? arguments : "", action);
   esp_err_t err = send_xml(req, xml);
   free(xml);
   return err;
@@ -296,17 +293,16 @@ static esp_err_t soap_response(httpd_req_t *req, const char *service,
 static esp_err_t soap_fault(httpd_req_t *req, int code,
                             const char *description) {
   char xml[768];
-  snprintf(
-      xml, sizeof(xml),
-      "<?xml version=\"1.0\"?><s:Envelope "
-      "xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-      "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-      "<s:Body><s:Fault><faultcode>s:Client</faultcode>"
-      "<faultstring>UPnPError</faultstring><detail><UPnPError "
-      "xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>%d</errorCode>"
-      "<errorDescription>%s</errorDescription></UPnPError></detail>"
-      "</s:Fault></s:Body></s:Envelope>",
-      code, description);
+  snprintf(xml, sizeof(xml),
+           "<?xml version=\"1.0\"?><s:Envelope "
+           "xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+           "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+           "<s:Body><s:Fault><faultcode>s:Client</faultcode>"
+           "<faultstring>UPnPError</faultstring><detail><UPnPError "
+           "xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>%d</errorCode>"
+           "<errorDescription>%s</errorDescription></UPnPError></detail>"
+           "</s:Fault></s:Body></s:Envelope>",
+           code, description);
   httpd_resp_set_status(req, "500 Internal Server Error");
   return send_xml(req, xml);
 }
@@ -341,7 +337,8 @@ static esp_err_t write_pcm(uint8_t *pcm_bytes, size_t bytes, int channels) {
       stereo[i * 2 + 1] = mono[i];
     }
     pcm_apply_gain(stereo, count * 2);
-    esp_err_t err = audio_output_write_pcm(stereo, count, portMAX_DELAY);
+    esp_err_t err =
+        audio_output_write_pcm(stereo, count, portMAX_DELAY);
     if (err != ESP_OK) {
       return err;
     }
@@ -366,8 +363,9 @@ static bool has_extension(const char *uri, const char *extension) {
          !strncasecmp(uri + uri_len - ext_len, extension, ext_len);
 }
 
-static esp_audio_simple_dec_type_t
-detect_decoder_type(const char *uri, const uint8_t *data, size_t len) {
+static esp_audio_simple_dec_type_t detect_decoder_type(const char *uri,
+                                                        const uint8_t *data,
+                                                        size_t len) {
   if (len >= 4 && !memcmp(data, "fLaC", 4)) {
     return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
   }
@@ -403,7 +401,8 @@ static const char *decoder_name(esp_audio_simple_dec_type_t type) {
 static esp_err_t decode_http_stream(esp_http_client_handle_t client,
                                     const char *uri, uint8_t *input,
                                     size_t first_len) {
-  esp_audio_simple_dec_type_t type = detect_decoder_type(uri, input, first_len);
+  esp_audio_simple_dec_type_t type =
+      detect_decoder_type(uri, input, first_len);
   if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
     ESP_LOGE(TAG, "Unsupported DLNA media format");
     return ESP_ERR_NOT_SUPPORTED;
@@ -451,8 +450,8 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
     }
 
     if (input_len == 0 && !eof) {
-      int n =
-          esp_http_client_read(client, (char *)input, DLNA_INPUT_BUFFER_SIZE);
+      int n = esp_http_client_read(client, (char *)input,
+                                   DLNA_INPUT_BUFFER_SIZE);
       if (n > 0) {
         input_len = (size_t)n;
       } else if (n == 0) {
@@ -652,9 +651,9 @@ static bool start_player(void) {
     return false;
   }
   s_stop_requested = false;
-  BaseType_t result = xTaskCreatePinnedToCore(player_task, "dlna_stream",
-                                              DLNA_PLAYER_STACK_SIZE, NULL, 6,
-                                              &s_player_task, 1);
+  BaseType_t result = xTaskCreatePinnedToCore(
+      player_task, "dlna_stream", DLNA_PLAYER_STACK_SIZE, NULL, 6,
+      &s_player_task, 1);
   if (result != pdPASS) {
     s_player_task = NULL;
     source_manager_release(SOURCE_MANAGER_DLNA);
@@ -667,7 +666,8 @@ static bool start_player(void) {
 static esp_err_t avtransport_control_handler(httpd_req_t *req) {
   char *body = recv_body(req);
   if (!body) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid SOAP body");
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "Invalid SOAP body");
   }
   const char *action = soap_action(req, body);
   char action_copy[64];
@@ -731,7 +731,8 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
 static esp_err_t rendering_control_handler(httpd_req_t *req) {
   char *body = recv_body(req);
   if (!body) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid SOAP body");
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "Invalid SOAP body");
   }
   const char *action = soap_action(req, body);
   char action_copy[64];
@@ -757,7 +758,8 @@ static esp_err_t rendering_control_handler(httpd_req_t *req) {
     return soap_fault(req, 401, "Invalid Action");
   }
 
-  esp_err_t result = soap_response(req, "RenderingControl", action_copy, args);
+  esp_err_t result =
+      soap_response(req, "RenderingControl", action_copy, args);
   free(body);
   return result;
 }
@@ -765,7 +767,8 @@ static esp_err_t rendering_control_handler(httpd_req_t *req) {
 static esp_err_t connection_control_handler(httpd_req_t *req) {
   char *body = recv_body(req);
   if (!body) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid SOAP body");
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "Invalid SOAP body");
   }
   const char *action = soap_action(req, body);
   char action_copy[64];
@@ -791,7 +794,8 @@ static esp_err_t connection_control_handler(httpd_req_t *req) {
     return soap_fault(req, 401, "Invalid Action");
   }
 
-  esp_err_t result = soap_response(req, "ConnectionManager", action_copy, args);
+  esp_err_t result =
+      soap_response(req, "ConnectionManager", action_copy, args);
   free(body);
   return result;
 }
@@ -827,12 +831,28 @@ static esp_err_t dlna_post_handler(httpd_req_t *req) {
                              "DLNA endpoint not found");
 }
 
+/* SSDP uses comparatively large UDP and HTTP-style text buffers. Keeping
+ * these buffers on the FreeRTOS task stack caused an immediate stack overflow
+ * during the first ssdp:alive announcement. Prefer PSRAM and fall back to the
+ * normal heap so boards without PSRAM still work. */
+static char *ssdp_alloc_buffer(size_t size) {
+  char *buffer = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer) {
+    buffer = malloc(size);
+  }
+  return buffer;
+}
+
 static void ssdp_send_response(int sock, const struct sockaddr_in *to,
                                const char *st) {
   char ip[16];
   current_ip(ip, sizeof(ip));
-  char response[896];
-  snprintf(response, sizeof(response),
+  char *response = ssdp_alloc_buffer(DLNA_SSDP_MESSAGE_SIZE);
+  if (!response) {
+    ESP_LOGW(TAG, "No memory for SSDP response");
+    return;
+  }
+  snprintf(response, DLNA_SSDP_MESSAGE_SIZE,
            "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n"
            "LOCATION: http://%s:%u/dlna/device.xml\r\n"
            "SERVER: %s\r\nST: %s\r\nUSN: %s::%s\r\n"
@@ -840,6 +860,7 @@ static void ssdp_send_response(int sock, const struct sockaddr_in *to,
            ip, (unsigned)s_http_port, DLNA_SERVER_NAME, st, s_udn, st);
   sendto(sock, response, strlen(response), 0, (const struct sockaddr *)to,
          sizeof(*to));
+  free(response);
 }
 
 static void ssdp_notify(int sock, const char *nts) {
@@ -848,16 +869,18 @@ static void ssdp_notify(int sock, const char *nts) {
   struct sockaddr_in addr = {.sin_family = AF_INET,
                              .sin_port = htons(DLNA_SSDP_PORT)};
   inet_pton(AF_INET, "239.255.255.250", &addr.sin_addr);
-  const char *types[] = {"upnp:rootdevice",
-                         s_udn,
+  const char *types[] = {"upnp:rootdevice", s_udn,
                          "urn:schemas-upnp-org:device:MediaRenderer:1",
-                         AVTRANSPORT_SERVICE,
-                         RENDERING_SERVICE,
+                         AVTRANSPORT_SERVICE, RENDERING_SERVICE,
                          CONNECTION_SERVICE};
+  char *msg = ssdp_alloc_buffer(DLNA_SSDP_MESSAGE_SIZE);
+  if (!msg) {
+    ESP_LOGW(TAG, "No memory for SSDP notification");
+    return;
+  }
   for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
-    char msg[896];
     bool udn_only = !strcmp(types[i], s_udn);
-    snprintf(msg, sizeof(msg),
+    snprintf(msg, DLNA_SSDP_MESSAGE_SIZE,
              "NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
              "CACHE-CONTROL: max-age=1800\r\n"
              "LOCATION: http://%s:%u/dlna/device.xml\r\n"
@@ -868,13 +891,36 @@ static void ssdp_notify(int sock, const char *nts) {
              udn_only ? "" : "::", udn_only ? "" : types[i]);
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&addr, sizeof(addr));
   }
+  free(msg);
 }
 
 static void ssdp_task(void *arg) {
   (void)arg;
+
+  /* The setup AP is for provisioning only. Do not advertise an unusable DLNA
+   * renderer until a station or Ethernet connection has a real network IP. */
+  while (s_ssdp_running && !wifi_is_connected() &&
+         !ethernet_is_connected()) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+  if (!s_ssdp_running) {
+    s_ssdp_task = NULL;
+    vTaskDelete(NULL);
+    return;
+  }
+
+  char *packet = ssdp_alloc_buffer(DLNA_SSDP_PACKET_SIZE);
+  if (!packet) {
+    ESP_LOGE(TAG, "No memory for SSDP receive buffer");
+    s_ssdp_task = NULL;
+    vTaskDelete(NULL);
+    return;
+  }
+
   int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (sock < 0) {
     ESP_LOGE(TAG, "SSDP socket failed: errno=%d", errno);
+    free(packet);
     s_ssdp_task = NULL;
     vTaskDelete(NULL);
     return;
@@ -887,6 +933,7 @@ static void ssdp_task(void *arg) {
   if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
     ESP_LOGE(TAG, "SSDP bind failed: errno=%d", errno);
     close(sock);
+    free(packet);
     s_ssdp_task = NULL;
     vTaskDelete(NULL);
     return;
@@ -916,20 +963,17 @@ static void ssdp_task(void *arg) {
       elapsed = 0;
     }
 
-    char packet[1536];
     struct sockaddr_in from;
     socklen_t from_len = sizeof(from);
-    int n = recvfrom(sock, packet, sizeof(packet) - 1, 0,
+    int n = recvfrom(sock, packet, DLNA_SSDP_PACKET_SIZE - 1, 0,
                      (struct sockaddr *)&from, &from_len);
     if (n > 0) {
       packet[n] = 0;
       if (strstr(packet, "M-SEARCH") && strstr(packet, "ssdp:discover")) {
-        const char *types[] = {"upnp:rootdevice",
-                               s_udn,
-                               "urn:schemas-upnp-org:device:MediaRenderer:1",
-                               AVTRANSPORT_SERVICE,
-                               RENDERING_SERVICE,
-                               CONNECTION_SERVICE};
+        const char *types[] = {
+            "upnp:rootdevice", s_udn,
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+            AVTRANSPORT_SERVICE, RENDERING_SERVICE, CONNECTION_SERVICE};
         for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
           if (strstr(packet, "ssdp:all") || strstr(packet, types[i])) {
             ssdp_send_response(sock, &from, types[i]);
@@ -947,6 +991,7 @@ static void ssdp_task(void *arg) {
     ssdp_notify(sock, "ssdp:byebye");
   }
   close(sock);
+  free(packet);
   s_ssdp_task = NULL;
   vTaskDelete(NULL);
 }
@@ -972,8 +1017,8 @@ esp_err_t dlna_renderer_register(httpd_handle_t server, uint16_t server_port) {
 
   if (!s_ssdp_task) {
     s_ssdp_running = true;
-    if (xTaskCreate(ssdp_task, "dlna_ssdp", 4096, NULL, 4, &s_ssdp_task) !=
-        pdPASS) {
+    if (xTaskCreate(ssdp_task, "dlna_ssdp", DLNA_SSDP_STACK_SIZE, NULL, 4,
+                    &s_ssdp_task) != pdPASS) {
       s_ssdp_running = false;
       s_ssdp_task = NULL;
       return ESP_ERR_NO_MEM;
@@ -1026,8 +1071,8 @@ void dlna_renderer_volume_step(int percent) {
 }
 
 esp_err_t dlna_renderer_play_uri(const char *uri) {
-  if (!uri ||
-      (strncmp(uri, "http://", 7) != 0 && strncmp(uri, "https://", 8) != 0)) {
+  if (!uri || (strncmp(uri, "http://", 7) != 0 &&
+               strncmp(uri, "https://", 8) != 0)) {
     return ESP_ERR_INVALID_ARG;
   }
   if (s_airplay_active) {
@@ -1038,10 +1083,6 @@ esp_err_t dlna_renderer_play_uri(const char *uri) {
   return start_player() ? ESP_OK : ESP_FAIL;
 }
 
-void dlna_renderer_stop_playback(void) {
-  stop_player(false);
-}
+void dlna_renderer_stop_playback(void) { stop_player(false); }
 
-const char *dlna_renderer_current_uri(void) {
-  return s_uri;
-}
+const char *dlna_renderer_current_uri(void) { return s_uri; }
