@@ -9,7 +9,6 @@ permissions:
 jobs:
   build-esp32s3:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -35,22 +34,7 @@ jobs:
         with:
           esp_idf_version: v5.5
           target: esp32s3
-          command: |
-            set -eu
-            rm -f sdkconfig sdkconfig.old
-            rm -rf build
-            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build
-            cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin
-            cd build
-            esptool.py --chip esp32s3 merge_bin --format raw \
-              -o ../airplay2-receiver-esp32s3-v0.3.00-install.bin \
-              $(cat flash_args)
-            cd ..
-            python3 -c "from pathlib import Path; b=Path('airplay2-receiver-esp32s3-v0.3.00-install.bin').read_bytes(); assert len(b) == 0x800000, f'unexpected merged size: {len(b)}'; assert b[0] == 0xE9, 'missing bootloader at 0x0'; assert b[2] == 2, 'bootloader is not DIO mode'; assert b[0x20000] == 0xE9, 'missing application at 0x20000'; print('Validated merged image: 8 MB, DIO, bootloader + application present')"
-            sha256sum \
-              airplay2-receiver-esp32s3-v0.3.00-install.bin \
-              airplay2-receiver-esp32s3-v0.3.00-ota.bin \
-              > SHA256SUMS-v0.3.00.txt
+          command: bash .github/scripts/build-esp32s3.sh
 
       - name: Upload installation files
         uses: actions/upload-artifact@v6
