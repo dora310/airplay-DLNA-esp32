@@ -5,9 +5,14 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
-# FLASH mode
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_ESPTOOLPY_FLASHMODE="qio"
+# Conservative flash settings matching the known-working ESP32-S3 image.
+# DIO is slower than QIO but is compatible with more ESP32-S3-WROOM-1 modules.
+# Keep these values explicit so a clean CI build cannot select QIO.
+# CONFIG_ESPTOOLPY_FLASHMODE_QIO is not set
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHMODE="dio"
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="80m"
 
 # CPU frequency
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
