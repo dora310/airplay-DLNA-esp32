@@ -4,6 +4,12 @@
 #include "esp_wifi_types.h"
 #include <stdbool.h>
 
+/* Keep the provisioning AP away from common home LAN ranges. The previous
+ * 192.168.4.1 address overlapped networks using 192.168.4.0/22 and prevented
+ * the station interface from completing DHCP after authentication. */
+#define WIFI_PROVISIONING_IP_STR  "192.168.240.1"
+#define WIFI_PROVISIONING_IP_ADDR 0x01F0A8C0UL
+
 /**
  * Initialize WiFi in both AP and STA modes
  * @param ap_ssid AP SSID (if NULL, uses default)

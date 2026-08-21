@@ -43,6 +43,37 @@ static wifi_config_t s_ap_config;
 static void wifi_select_best_ap(const char *ssid);
 static void scan_and_connect_task(void *arg);
 
+static void configure_provisioning_subnet(void) {
+  if (!s_ap_netif) {
+    return;
+  }
+
+  /* The ESP-IDF default SoftAP address (192.168.4.1/24) conflicts with LANs
+   * such as 192.168.4.0/22. Use a separate, uncommon /24 so the STA DHCP
+   * client can install its LAN address and gateway without an overlapping
+   * SoftAP route. */
+  esp_netif_ip_info_t info = {0};
+  IP4_ADDR(&info.ip, 192, 168, 240, 1);
+  IP4_ADDR(&info.gw, 192, 168, 240, 1);
+  IP4_ADDR(&info.netmask, 255, 255, 255, 0);
+
+  /* The default AP netif owns the DHCP server. Stop it before changing the
+   * interface address, then restart it with the new subnet. */
+  esp_netif_dhcps_stop(s_ap_netif);
+  esp_err_t err = esp_netif_set_ip_info(s_ap_netif, &info);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to configure provisioning subnet: %s",
+             esp_err_to_name(err));
+    return;
+  }
+  err = esp_netif_dhcps_start(s_ap_netif);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Provisioning DHCP start returned: %s",
+             esp_err_to_name(err));
+  }
+  ESP_LOGI(TAG, "Provisioning AP address: " WIFI_PROVISIONING_IP_STR "/24");
+}
+
 static void sanitize_hostname(const char *name, char *out, size_t out_len) {
   size_t j = 0;
   for (size_t i = 0; name[i] && j < out_len - 1; i++) {
@@ -331,6 +362,7 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   }
   if (!s_ap_netif) {
     s_ap_netif = esp_netif_create_default_wifi_ap();
+    configure_provisioning_subnet();
   }
 
   // Configure STA
@@ -383,7 +415,8 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   if (s_has_credentials) {
     ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
   } else {
-    ESP_LOGI(TAG, "Provisioning mode active at http://192.168.4.1");
+    ESP_LOGI(TAG, "Provisioning mode active at http://"
+                  WIFI_PROVISIONING_IP_STR);
   }
 }
 
