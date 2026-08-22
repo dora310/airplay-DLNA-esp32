@@ -115,7 +115,7 @@ menu "Airplay ESP Configuration"
     menu "WiFi Configuration"
     config DEFAULT_AP_SSID
         string "Access Point SSID"
-        default "ESP32-AirPlay-Setup"
+        default "AirPlay and DLNA Setup"
         help
             SSID (network name) the ESP32 will broadcast.
 

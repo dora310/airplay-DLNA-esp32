@@ -281,11 +281,11 @@ void app_main(void) {
     // Wait for initial WiFi connection if credentials exist
     if (settings_has_wifi_credentials()) {
       if (!wifi_wait_connected(30000)) {
-        ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://"
+        ESP_LOGI(TAG, "Connect to 'AirPlay and DLNA Setup' -> http://"
                       WIFI_PROVISIONING_IP_STR);
       }
     } else {
-      ESP_LOGI(TAG, "Connect to 'ESP32-AirPlay-Setup' -> http://"
+      ESP_LOGI(TAG, "Connect to 'AirPlay and DLNA Setup' -> http://"
                     WIFI_PROVISIONING_IP_STR);
     }
   } else {
