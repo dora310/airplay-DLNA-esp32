@@ -1,41 +1,33 @@
-AirPlay and DLNA Receiver v3.2.0 replacement package
-====================================================
+GitHub ESP-IDF matrix build fix
+================================
 
-1. Extract this ZIP into the root of your existing GitHub source repository.
-2. Allow it to replace files with the same names and keep the folder layout.
-3. Commit every replacement file, including the new files:
-     main/maintenance.c
-     main/maintenance.h
-4. Push the commit to GitHub.
-5. Open GitHub -> Actions -> Build ESP32-S3 installation BIN -> Run workflow.
-6. Download the airplay-esp32s3-v3.2.0-bin-files artifact.
+Problem fixed
+-------------
+The repository's generated sdkconfig was created for ESP32-S3. Matrix jobs
+that build ESP32 targets then failed because IDF_TARGET was set to esp32.
 
-Use the generated files as follows:
+Installation
+------------
+1. Extract this ZIP into the root of your GitHub repository.
+2. Allow these files to replace the existing files:
+     .github/workflows/build.yml
+     .gitignore
+3. Remove any generated sdkconfig files already committed to Git:
+     git rm --cached sdkconfig sdkconfig.old
+   If Git says a file does not exist or is not tracked, that is safe to ignore.
+4. Also delete the local build folder if it exists.
+5. Commit and push the changes.
+6. Open GitHub > Actions and rerun the failed workflow.
 
-- Fresh USB installation:
-  airplay2-receiver-esp32s3-v3.2.0-install.bin at address 0x0.
-- Update from the web panel:
-  airplay2-receiver-esp32s3-v3.2.0-ota.bin only.
+What changed
+------------
+Before every target build, the workflow now removes sdkconfig, sdkconfig.old,
+and build/. ESP-IDF then creates a fresh configuration for the current matrix
+target. The .gitignore prevents generated configurations and build output from
+being committed again.
 
-Never upload the merged install BIN through the OTA web form.
-
-After installation, open:
-
-  http://DEVICE-IP/advanced
-
-The advanced page contains backup/restore, persistent diagnostics, speaker
-protection, scheduled restart, themes, access password and factory reset.
-
-Validation performed before packaging
---------------------------------------
-
-- Browser JavaScript syntax checked for index, advanced, logs and speedtest.
-- HTML control IDs checked for duplicates.
-- All v3.2 API routes and UI controls checked for presence.
-- Firmware version and ESP-IDF rollback configuration checked.
-- C source brace balance checked for all modified modules.
-- Package paths and ZIP integrity checked.
-
-The ESP-IDF cross-compiler is not installed in the delivery environment, so
-the final hardware BIN must be compiled by the included GitHub Actions
-workflow before flashing.
+Note
+----
+The .github folder begins with a dot and can be hidden by Windows or archive
+programs. Extract the ZIP directly into the repository root so the folder
+structure is preserved.
