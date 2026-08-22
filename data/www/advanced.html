@@ -17,6 +17,26 @@
       --good: #b7efcf;
       --error: #ff9aa9;
     }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --background: #eef1f7;
+      --panel: #ffffff;
+      --field: #e5e9f2;
+      --text: #172033;
+      --muted: #596174;
+      --accent: #d92f5b;
+      --link: #006a9c;
+      --good: #176c45;
+      --error: #a5162c;
+    }
+    @media (prefers-color-scheme: light) {
+      :root[data-theme="auto"] {
+        color-scheme: light;
+        --background: #eef1f7; --panel: #ffffff; --field: #e5e9f2;
+        --text: #172033; --muted: #596174; --accent: #d92f5b;
+        --link: #006a9c; --good: #176c45; --error: #a5162c;
+      }
+    }
     * { box-sizing: border-box; }
     body {
       font: 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -47,7 +67,7 @@
     button:disabled { cursor: wait; opacity: 0.65; }
     input, select {
       background: var(--field);
-      color: white;
+      color: var(--text);
       min-width: 240px;
     }
     input[type="checkbox"] { min-width: auto; }
@@ -78,13 +98,16 @@
     .eq-value { text-align: right; color: var(--good); font-variant-numeric: tabular-nums; }
     .playback-icon { font-size: 1.1em; margin-right: 5px; }
     a { color: var(--link); }
+    body.locked section:not(.access-section) { display: none; }
+    .danger-zone { border: 1px solid var(--error); }
+    .log-box { max-height: 320px; overflow: auto; background: var(--field); padding: 12px; }
   </style>
 </head>
-<body>
+<body class="locked">
   <h1>AirPlay and DLNA Receiver <small id="pageVersion"></small></h1>
   <p><a href="/">&larr; Basic settings</a></p>
 
-  <section>
+  <section class="access-section">
     <h2>API access</h2>
     <label>
       Current API password
@@ -92,6 +115,7 @@
              placeholder="Required only when protection is enabled">
     </label>
     <button id="saveApiKeyButton" type="button">Remember API password</button>
+    <button id="unlockButton" type="button">Unlock controls</button>
     <label>
       New API password
       <input id="newPassword" type="password" autocomplete="new-password"
@@ -224,6 +248,73 @@
     <pre id="diagnosticStatus" aria-live="polite">Loading...</pre>
   </section>
 
+  <section>
+    <h2>Audio protection</h2>
+    <label><input id="speakerProtection" type="checkbox"> Enable speaker protection</label>
+    <label>
+      Protection threshold
+      <input id="speakerThreshold" type="range" min="50" max="98" value="90">
+      <span id="speakerThresholdValue">90%</span>
+    </label>
+    <p id="protectionStats" class="muted">Loading protection counters...</p>
+    <button id="saveProtectionButton" type="button">Save protection</button>
+    <button id="resetCountersButton" class="secondary" type="button">Reset counters</button>
+    <p id="protectionMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Scheduled restart</h2>
+    <label><input id="scheduledRestart" type="checkbox"> Enable automatic restart</label>
+    <label>
+      Restart interval
+      <select id="restartHours">
+        <option value="12">Every 12 hours</option>
+        <option value="24">Every 24 hours</option>
+        <option value="48">Every 48 hours</option>
+        <option value="168">Every 7 days</option>
+      </select>
+    </label>
+    <p class="muted">The restart becomes due at the selected uptime interval, but occurs only after AirPlay, DLNA and radio are idle.</p>
+    <button id="saveRestartButton" type="button">Save restart schedule</button>
+    <p id="restartMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Interface theme</h2>
+    <select id="themeSelect">
+      <option value="0">Follow device/browser</option>
+      <option value="1">Dark</option>
+      <option value="2">Light</option>
+    </select>
+    <button id="saveThemeButton" type="button">Save theme</button>
+    <p id="themeMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Backup and restore</h2>
+    <button id="downloadBackupButton" type="button">Download all settings</button>
+    <input id="restoreFile" type="file" accept="application/json,.json">
+    <button id="restoreBackupButton" type="button">Restore settings</button>
+    <p class="muted">The authenticated backup includes Wi-Fi credentials and the access-password digest. Store it securely. Restart after restoring.</p>
+    <p id="backupMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Persistent diagnostic log</h2>
+    <button id="loadPersistentLogButton" type="button">Refresh retained errors</button>
+    <button id="clearPersistentLogButton" class="secondary" type="button">Clear retained errors</button>
+    <pre id="persistentLog" class="log-box">Not loaded.</pre>
+  </section>
+
+  <section class="danger-zone">
+    <h2>Factory reset</h2>
+    <p class="muted">This erases Wi-Fi, device, DSP, radio, protection, schedule and password settings.</p>
+    <input id="factoryConfirmation" type="text" autocomplete="off"
+           placeholder="Type ERASE ALL SETTINGS">
+    <button id="factoryResetButton" type="button">Erase all settings</button>
+    <p id="factoryMessage" class="message"></p>
+  </section>
+
   <script>
     (() => {
       'use strict';
@@ -255,7 +346,22 @@
           document.getElementById(`eq${index}Value`)),
         dspMessage: document.getElementById('dspMessage'),
         refreshButton: document.getElementById('refreshButton'),
-        diagnosticStatus: document.getElementById('diagnosticStatus')
+        diagnosticStatus: document.getElementById('diagnosticStatus'),
+        speakerProtection: document.getElementById('speakerProtection'),
+        speakerThreshold: document.getElementById('speakerThreshold'),
+        speakerThresholdValue: document.getElementById('speakerThresholdValue'),
+        protectionStats: document.getElementById('protectionStats'),
+        protectionMessage: document.getElementById('protectionMessage'),
+        scheduledRestart: document.getElementById('scheduledRestart'),
+        restartHours: document.getElementById('restartHours'),
+        restartMessage: document.getElementById('restartMessage'),
+        themeSelect: document.getElementById('themeSelect'),
+        themeMessage: document.getElementById('themeMessage'),
+        backupMessage: document.getElementById('backupMessage'),
+        restoreFile: document.getElementById('restoreFile'),
+        persistentLog: document.getElementById('persistentLog'),
+        factoryConfirmation: document.getElementById('factoryConfirmation'),
+        factoryMessage: document.getElementById('factoryMessage')
       };
 
       const eqFrequencies = [80, 250, 1000, 4000, 12000];
@@ -272,6 +378,8 @@
       };
 
       elements.apiKey.value = localStorage.getItem('apiKey') || '';
+      const storedTheme = localStorage.getItem('receiverTheme') || 'auto';
+      document.documentElement.dataset.theme = storedTheme;
       function requestHeaders() {
         const headers = { Accept: 'application/json' };
         const key = elements.apiKey.value ||
@@ -388,6 +496,164 @@
         } finally {
           elements.refreshButton.disabled = false;
           elements.refreshButton.textContent = 'Refresh';
+        }
+      }
+
+      async function unlockControls() {
+        localStorage.setItem('apiKey', elements.apiKey.value);
+        const result = await api('/api/v1/auth');
+        const unlocked = result.success && result.http_ok !== false;
+        document.body.classList.toggle('locked', !unlocked);
+        elements.securityMessage.textContent = unlocked
+          ? 'Control panel unlocked.'
+          : resultMessage(result, '');
+        if (unlocked) await initializeProtectedControls();
+        return unlocked;
+      }
+
+      function applyMaintenanceValues(result) {
+        if (!result || !result.success) return;
+        elements.speakerProtection.checked = Boolean(result.speaker_protection);
+        elements.speakerThreshold.value = result.speaker_threshold_percent ?? 90;
+        elements.speakerThresholdValue.textContent = `${elements.speakerThreshold.value}%`;
+        elements.scheduledRestart.checked = Boolean(result.scheduled_restart);
+        elements.restartHours.value = String(result.restart_interval_hours ?? 24);
+        elements.themeSelect.value = String(result.theme ?? 0);
+        const due = result.restart_remaining_seconds
+          ? `${Math.ceil(result.restart_remaining_seconds / 3600)} hour(s) until due`
+          : result.scheduled_restart ? 'Restart is due and waiting for idle' : 'Disabled';
+        elements.restartMessage.textContent = `${due}; audio is ${result.audio_idle ? 'idle' : 'active'}.`;
+        elements.protectionStats.textContent =
+          `Limiter ${result.limiter_active ? 'active' : 'inactive'} · ` +
+          `${result.limiter_events ?? 0} limiter event(s) · ` +
+          `${result.clipping_events ?? 0} clipping event(s)`;
+        applyTheme(Number(result.theme ?? 0));
+      }
+
+      async function loadMaintenance() {
+        const result = await api('/api/v1/maintenance');
+        applyMaintenanceValues(result);
+        return result;
+      }
+
+      async function saveMaintenance(extra = {}, messageElement = elements.protectionMessage) {
+        const body = {
+          speaker_protection: elements.speakerProtection.checked,
+          speaker_threshold_percent: Number(elements.speakerThreshold.value),
+          scheduled_restart: elements.scheduledRestart.checked,
+          restart_interval_hours: Number(elements.restartHours.value),
+          theme: Number(elements.themeSelect.value),
+          ...extra
+        };
+        const result = await api('/api/v1/maintenance', {
+          method: 'POST', body: JSON.stringify(body)
+        });
+        messageElement.textContent = resultMessage(result, 'Settings saved.');
+        applyMaintenanceValues(result);
+      }
+
+      function applyTheme(theme) {
+        const name = theme === 1 ? 'dark' : theme === 2 ? 'light' : 'auto';
+        document.documentElement.dataset.theme = name;
+        localStorage.setItem('receiverTheme', name);
+      }
+
+      async function downloadBackup() {
+        elements.backupMessage.textContent = 'Preparing settings backup...';
+        const response = await fetch('/api/v1/backup', {
+          cache: 'no-store', headers: requestHeaders()
+        });
+        if (!response.ok) {
+          elements.backupMessage.textContent = `Backup failed: HTTP ${response.status}`;
+          return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'airplay-dlna-settings.json';
+        document.body.append(link); link.click(); link.remove();
+        URL.revokeObjectURL(url);
+        elements.backupMessage.textContent = 'Settings backup downloaded.';
+      }
+
+      async function restoreBackup() {
+        const file = elements.restoreFile.files[0];
+        if (!file) {
+          elements.backupMessage.textContent = 'Choose a JSON backup first.';
+          return;
+        }
+        let text;
+        try { text = await file.text(); JSON.parse(text); }
+        catch (error) {
+          elements.backupMessage.textContent = `Invalid JSON backup: ${error.message}`;
+          return;
+        }
+        if (!confirm('Restore all settings from this backup?')) return;
+        const result = await api('/api/v1/backup/restore', {
+          method: 'POST', body: text
+        });
+        elements.backupMessage.textContent = resultMessage(
+          result, 'Settings restored. Restart the receiver to apply everything.');
+      }
+
+      async function loadPersistentLog() {
+        elements.persistentLog.textContent = 'Loading...';
+        const response = await fetch('/api/v1/diagnostics/log', {
+          cache: 'no-store', headers: requestHeaders()
+        });
+        const text = await response.text();
+        elements.persistentLog.textContent = response.ok
+          ? (text || 'No retained warnings or errors.')
+          : `Unable to load log: ${text || response.status}`;
+      }
+
+      async function clearPersistentLog() {
+        if (!confirm('Clear the retained diagnostic history?')) return;
+        const result = await api('/api/v1/diagnostics/clear', {
+          method: 'POST', body: '{}'
+        });
+        elements.persistentLog.textContent = result.success
+          ? 'Diagnostic history cleared.' : resultMessage(result, '');
+      }
+
+      async function factoryReset() {
+        if (elements.factoryConfirmation.value !== 'ERASE ALL SETTINGS') {
+          elements.factoryMessage.textContent = 'Type ERASE ALL SETTINGS exactly.';
+          return;
+        }
+        if (!confirm('Final warning: erase every receiver setting and restart?')) return;
+        const result = await api('/api/v1/factory-reset', {
+          method: 'POST',
+          body: JSON.stringify({ confirmation: elements.factoryConfirmation.value })
+        });
+        elements.factoryMessage.textContent = result.success
+          ? 'Settings erased. Receiver is restarting.' : resultMessage(result, '');
+      }
+
+      let protectedInitialized = false;
+      async function initializeProtectedControls() {
+        if (protectedInitialized) return;
+        protectedInitialized = true;
+        await Promise.all([
+          loadPresets(), refreshSleepTimer(), refreshDiagnostics(),
+          loadMaintenance(), loadPersistentLog()
+        ]);
+      }
+
+      async function initializeAccess() {
+        const status = await api('/api/v1/status');
+        if (status.version) elements.pageVersion.textContent = `v${status.version}`;
+        if (!status.password_set) {
+          document.body.classList.remove('locked');
+          await initializeProtectedControls();
+        } else {
+          document.body.classList.add('locked');
+          if (elements.apiKey.value) await unlockControls();
+          if (document.body.classList.contains('locked')) {
+            elements.securityMessage.textContent =
+              'Enter the access password and press Unlock controls.';
+          }
         }
       }
 
@@ -586,8 +852,10 @@
           localStorage.setItem('apiKey', elements.apiKey.value);
           elements.securityMessage.textContent =
             'API password remembered in this browser.';
-          refreshDiagnostics();
+          unlockControls();
         });
+      document.getElementById('unlockButton')
+        .addEventListener('click', unlockControls);
       document.getElementById('setPasswordButton')
         .addEventListener('click', setPassword);
       document.getElementById('radioButton')
@@ -613,6 +881,32 @@
         .addEventListener('click', () => applyEqPreset('loudness'));
       document.getElementById('flatButton')
         .addEventListener('click', () => applyEqPreset('flat'));
+      document.getElementById('saveProtectionButton')
+        .addEventListener('click', () => saveMaintenance({}, elements.protectionMessage));
+      document.getElementById('resetCountersButton')
+        .addEventListener('click', () => saveMaintenance(
+          { reset_counters: true }, elements.protectionMessage));
+      document.getElementById('saveRestartButton')
+        .addEventListener('click', () => saveMaintenance({}, elements.restartMessage));
+      document.getElementById('saveThemeButton')
+        .addEventListener('click', () => {
+          applyTheme(Number(elements.themeSelect.value));
+          saveMaintenance({}, elements.themeMessage);
+        });
+      document.getElementById('downloadBackupButton')
+        .addEventListener('click', downloadBackup);
+      document.getElementById('restoreBackupButton')
+        .addEventListener('click', restoreBackup);
+      document.getElementById('loadPersistentLogButton')
+        .addEventListener('click', loadPersistentLog);
+      document.getElementById('clearPersistentLogButton')
+        .addEventListener('click', clearPersistentLog);
+      document.getElementById('factoryResetButton')
+        .addEventListener('click', factoryReset);
+      elements.speakerThreshold.addEventListener('input', () => {
+        elements.speakerThresholdValue.textContent =
+          `${elements.speakerThreshold.value}%`;
+      });
       elements.eqGains.forEach(slider => {
         slider.addEventListener('input', () => {
           elements.dspOn.checked = true;
@@ -626,10 +920,8 @@
           () => sendControl(button.dataset.control));
       });
 
-      loadPresets();
       updateEqDisplays();
-      refreshSleepTimer();
-      refreshDiagnostics();
+      initializeAccess();
     })();
   </script>
 </body>

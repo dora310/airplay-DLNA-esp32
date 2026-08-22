@@ -23,6 +23,8 @@ select,input{width:100%;padding:10px;background:rgba(0,0,0,0.3);border:1px solid
 .unit{font-size:14px;color:#888;margin-left:4px}
 .log{font-family:ui-monospace,monospace;font-size:11px;color:#888;max-height:140px;overflow-y:auto;padding:8px;background:rgba(0,0,0,0.3);border-radius:6px;white-space:pre-wrap}
 a{color:#e94560}
+html[data-theme=light] body{background:#eef1f7;color:#172033}html[data-theme=light] .card{background:#fff;border-color:#d7dce8}html[data-theme=light] select,html[data-theme=light] input,html[data-theme=light] .log{background:#e5e9f2;color:#172033;border-color:#ccd2df}
+@media(prefers-color-scheme:light){html[data-theme=auto] body{background:#eef1f7;color:#172033}html[data-theme=auto] .card{background:#fff;border-color:#d7dce8}html[data-theme=auto] select,html[data-theme=auto] input,html[data-theme=auto] .log{background:#e5e9f2;color:#172033;border-color:#ccd2df}}
 </style></head><body>
 <div class='wrap'>
 <h1>WiFi Speedtest</h1>
@@ -78,6 +80,7 @@ a{color:#e94560}
 </div>
 
 <script>
+document.documentElement.dataset.theme=localStorage.getItem('receiverTheme')||'auto';
 const $ = id => document.getElementById(id);
 function log(s){const l=$('log');l.textContent+=s+'\n';l.scrollTop=l.scrollHeight;}
 function fmtBytes(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB';if(n>=1024)return (n/1024).toFixed(1)+' KB';return n+' B';}

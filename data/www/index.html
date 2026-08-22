@@ -47,10 +47,22 @@ input:focus{outline:none;border-color:#e94560}
 .slider-row{display:flex;align-items:center;gap:12px}
 .slider-row input[type=range]{flex:1;accent-color:#e94560}
 .slider-row span{font-size:13px;color:#888;min-width:32px;text-align:right}
+body.locked .card:not(#access-card){display:none}
+#access-card{display:none}
+body.locked #access-card{display:block}
+html[data-theme=light] body{background:#eef1f7;color:#172033}
+html[data-theme=light] .card{background:#fff;border-color:#d7dce8}
+html[data-theme=light] input[type=text],html[data-theme=light] input[type=password]{background:#e5e9f2;color:#172033;border-color:#ccd2df}
+html[data-theme=light] .info-item,html[data-theme=light] .wifi-item{background:#e5e9f2}
+@media(prefers-color-scheme:light){html[data-theme=auto] body{background:#eef1f7;color:#172033}html[data-theme=auto] .card{background:#fff;border-color:#d7dce8}html[data-theme=auto] input[type=text],html[data-theme=auto] input[type=password]{background:#e5e9f2;color:#172033;border-color:#ccd2df}html[data-theme=auto] .info-item,html[data-theme=auto] .wifi-item{background:#e5e9f2}}
 </style></head><body>
 <div class='wrap'>
 <div class='header'><h1>AirPlay 2 and DLNA+ Receiver</h1><p>Configuration Panel</p></div>
 <div id='status-bar' class='status-bar'>Loading...</div>
+<div class='card' id='access-card'><h2>Access protected</h2>
+<div class='form-group'><label>Control-panel password</label><input type='password' id='main-api-key' autocomplete='current-password'></div>
+<button class='btn btn-primary btn-block' onclick='unlockPanel()'>Unlock control panel</button>
+<div id='access-msg'></div></div>
 <div class='card'><h2>WiFi Network</h2>
 <button class='btn btn-secondary' onclick='scanWiFi()'>Scan Networks</button>
 <div id='wifi-list' class='wifi-list'></div>
@@ -89,7 +101,7 @@ input:focus{outline:none;border-color:#e94560}
 <div class='actions'><button class='btn btn-danger' onclick='restart()'>Restart Device</button></div>
 </div>
 <div class='card'><h2>System Logs</h2>
-<p style='color:#888;font-size:13px;margin-bottom:12px'>Live log output via WebSocket</p>
+<p style='color:#888;font-size:13px;margin-bottom:12px'>Live view plus retained warning and error history</p>
 <a href='/logs' class='btn btn-primary'>Open Log Viewer</a></div>
 <div class='card'><h2>WiFi Speedtest</h2>
 <p style='color:#888;font-size:13px;margin-bottom:12px'>Measure latency and throughput to this device</p>
@@ -102,6 +114,7 @@ input:focus{outline:none;border-color:#e94560}
 <a href='/advanced' class='btn btn-primary'>Open Advanced Controls</a></div>
 </div>
 <script>
+document.documentElement.dataset.theme=localStorage.getItem('receiverTheme')||'auto';
 function apiKey(){return localStorage.getItem('apiKey')||'';}
 function msg(id,txt,type){var e=document.getElementById(id);if(e){e.innerHTML='<div class="msg '+type+'">'+txt+'</div>';setTimeout(function(){e.innerHTML='';},4000);}}
 async function scanWiFi(){
@@ -138,11 +151,27 @@ async function saveName(){
 async function startOTA(){
   var f=document.getElementById('fw-file').files[0];if(!f){msg('ota-msg','Select a file','err');return;}
   document.getElementById('ota-btn').disabled=true;msg('ota-msg','Uploading...','info');
-  try{await fetch('/api/ota/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-API-Key':apiKey()},body:f});msg('ota-msg','Done! Rebooting...','ok');}
-  catch(e){msg('ota-msg','Rebooting...','ok');}}
+  try{var r=await fetch('/api/ota/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-API-Key':apiKey()},body:f});
+    if(r.ok){msg('ota-msg','Validated. Rebooting into rollback-protected update...','ok');}
+    else{msg('ota-msg','Update rejected: '+(await r.text()),'err');document.getElementById('ota-btn').disabled=false;}}
+  catch(e){msg('ota-msg','Connection closed while receiver restarts.','info');}}
 async function restart(){
   if(!confirm('Restart the device?'))return;
   try{await fetch('/api/system/restart',{method:'POST',headers:{'X-API-Key':apiKey()}});msg('','Restarting...','info');}catch(e){}}
+async function unlockPanel(){
+  var key=document.getElementById('main-api-key').value;localStorage.setItem('apiKey',key);
+  try{var r=await fetch('/api/v1/auth',{headers:{'X-API-Key':key}});var d=await r.json();
+    if(r.ok&&d.success){document.body.classList.remove('locked');loadInfo();loadBrightness();}
+    else{msg('access-msg','Incorrect password','err');}}
+  catch(e){msg('access-msg','Unable to contact receiver','err');}}
+async function checkAccess(){
+  try{var r=await fetch('/api/v1/status',{cache:'no-store'});var d=await r.json();
+    if(!d.password_set){document.body.classList.remove('locked');return true;}
+    var key=apiKey();if(key){var a=await fetch('/api/v1/auth',{headers:{'X-API-Key':key}});if(a.ok){document.body.classList.remove('locked');return true;}}
+    document.body.classList.add('locked');document.getElementById('main-api-key').value=key;return false;}
+  catch(e){return true;}}
+async function loadSavedTheme(){try{var r=await fetch('/api/v1/maintenance',{cache:'no-store'});var d=await r.json();
+  if(d.success){var n=d.theme===1?'dark':d.theme===2?'light':'auto';document.documentElement.dataset.theme=n;localStorage.setItem('receiverTheme',n);}}catch(e){}}
 async function loadInfo(){
   try{var r=await fetch('/api/system/info');var d=await r.json();
     if(d.success){var i=d.info;var b=document.getElementById('status-bar');
@@ -162,9 +191,9 @@ async function loadInfo(){
       document.getElementById('info-bssid').textContent=i.wifi_bssid||'-';
       if(i.eq_supported){document.getElementById('eq-card').style.display='';}
       document.getElementById('dev-name').placeholder=i.airplay_device_name||'AirPlay and DLNA';}}catch(e){}}
-window.onload=function(){
+window.onload=async function(){
   document.getElementById('fw-file').onchange=function(e){var f=e.target.files[0];
     document.getElementById('fw-name').textContent=f?f.name:'No file selected';
     document.getElementById('ota-btn').disabled=!f;};
-  loadInfo();loadBrightness();setInterval(loadInfo,30000);};
+  await loadSavedTheme();if(await checkAccess()){loadInfo();loadBrightness();setInterval(loadInfo,30000);}};
 </script></body></html>
