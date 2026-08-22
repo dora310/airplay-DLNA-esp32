@@ -1,8 +1,8 @@
-ESP32 AirPlay/DLNA v0.3.00 development-source validation
+ESP32 AirPlay/DLNA v3.0.1 development-source validation
 Date: 2026-08-20
 
 Passed:
-- Version file reports 0.3.00.
+- Version file reports 3.0.1.
 - All newly added C translation units are registered in main/CMakeLists.txt.
 - C delimiter consistency checks passed for all new C files.
 - JavaScript syntax checks passed for index.html and advanced.html.
@@ -15,5 +15,5 @@ Not performed:
 - Flash/hardware test, Wi-Fi association, AirPlay session, DLNA stream, DSP
   listening test, MQTT broker test, OTA rollback test.
 
-No v0.3.00 binary is included. Files under release-v0200-reference are the
-previously tested v0.2.00 recovery images and must not be treated as v0.3.00.
+No v3.0.1 binary is included. Files under release-v0200-reference are the
+previously tested v0.2.00 recovery images and must not be treated as v3.0.1.

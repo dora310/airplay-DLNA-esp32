@@ -1,4 +1,4 @@
-# ESP32-S3 AirPlay 2 + DLNA v0.3.00 development source
+# ESP32-S3 AirPlay 2 + DLNA v3.0.1 development source
 
 This branch keeps the working v0.2.00 AirPlay protocol, HAP, RTSP, PTP and
 audio-receiver code intact. New services sit behind a central audio-source
@@ -92,5 +92,13 @@ mapping. A clean build should regenerate the managed components from
 This archive is a development source handoff. It has static consistency checks
 but was not compiled or tested on hardware in the current environment because
 the ESP-IDF Xtensa toolchain is not installed. Do not flash a binary labeled
-v0.3.00 unless it was produced from this source and tested first on a recovery-
+v3.0.1 unless it was produced from this source and tested first on a recovery-
 capable board.
+
+## One-click GitHub build
+
+After pushing this folder to the default branch of a GitHub repository, open
+**Actions**, select **Build ESP32-S3 installation BIN**, choose **Run workflow**,
+and download the `airplay-esp32s3-v3.0.1-bin-files` artifact. It contains the
+merged installation image for address `0x0`, the application-only OTA image,
+and SHA-256 checksums.

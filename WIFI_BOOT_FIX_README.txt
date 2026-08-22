@@ -1,4 +1,4 @@
-ESP32-S3 v0.3.00 deep WiFi/boot stability replacement files
+ESP32-S3 v3.0.1 deep WiFi/boot stability replacement files
 ============================================================
 
 Copy the extracted files into the ROOT of the GitHub repository and allow
