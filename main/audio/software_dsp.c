@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
+#include "settings.h"
 #include <math.h>
 #include <string.h>
 
@@ -18,6 +19,9 @@ static biquad_t s_eq[SOFTWARE_DSP_PEAK_BANDS];
 static biquad_t s_crossover;
 static uint32_t s_rate = 44100;
 static uint32_t s_limiter_count;
+static uint32_t s_clipping_count;
+static bool s_speaker_protection;
+static uint8_t s_speaker_threshold_percent = 90;
 static float s_normalizer_gain = 1.0f;
 static SemaphoreHandle_t s_lock;
 
@@ -130,6 +134,11 @@ esp_err_t software_dsp_init(uint32_t sample_rate) {
     nvs_close(nvs);
   }
   sanitize_config(&s_cfg);
+  settings_maintenance_t maintenance;
+  if (settings_get_maintenance(&maintenance) == ESP_OK) {
+    s_speaker_protection = maintenance.speaker_protection_enabled;
+    s_speaker_threshold_percent = maintenance.speaker_threshold_percent;
+  }
   rebuild();
   return ESP_OK;
 }
@@ -175,7 +184,7 @@ static float run_biquad(biquad_t *b, float x, int ch) {
 void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
   if (!pcm || frames == 0 || channels != 2 || !s_lock) return;
   xSemaphoreTake(s_lock, portMAX_DELAY);
-  if (!s_cfg.enabled) {
+  if (!s_cfg.enabled && !s_speaker_protection) {
     xSemaphoreGive(s_lock);
     return;
   }
@@ -185,7 +194,7 @@ void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
     float a = fabsf((float)pcm[i]);
     if (a > peak) peak = a;
   }
-  if (s_cfg.normalization_enabled) {
+  if (s_cfg.enabled && s_cfg.normalization_enabled) {
     float target = 32767.0f * powf(10.0f, s_cfg.normalization_target_dbfs / 20.0f);
     float wanted = clampf(target / peak, 0.25f, 4.0f);
     s_normalizer_gain += (wanted - s_normalizer_gain) * 0.0025f;
@@ -193,27 +202,36 @@ void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
     s_normalizer_gain = 1.0f;
   }
 
-  float left_gain = s_cfg.balance > 0 ? 1.0f - s_cfg.balance : 1.0f;
-  float right_gain = s_cfg.balance < 0 ? 1.0f + s_cfg.balance : 1.0f;
+  float left_gain = s_cfg.enabled && s_cfg.balance > 0
+                        ? 1.0f - s_cfg.balance : 1.0f;
+  float right_gain = s_cfg.enabled && s_cfg.balance < 0
+                         ? 1.0f + s_cfg.balance : 1.0f;
   for (size_t i = 0; i < frames; i++) {
     float l = pcm[i * 2], r = pcm[i * 2 + 1];
-    switch (s_cfg.channel) {
-    case DSP_CHANNEL_MONO: l = r = (l + r) * 0.5f; break;
-    case DSP_CHANNEL_LEFT: r = l; break;
-    case DSP_CHANNEL_RIGHT: l = r; break;
-    case DSP_CHANNEL_SWAP: { float t = l; l = r; r = t; break; }
-    default: break;
+    if (s_cfg.enabled) {
+      switch (s_cfg.channel) {
+      case DSP_CHANNEL_MONO: l = r = (l + r) * 0.5f; break;
+      case DSP_CHANNEL_LEFT: r = l; break;
+      case DSP_CHANNEL_RIGHT: l = r; break;
+      case DSP_CHANNEL_SWAP: { float t = l; l = r; r = t; break; }
+      default: break;
+      }
     }
     l *= left_gain * s_normalizer_gain;
     r *= right_gain * s_normalizer_gain;
-    for (int b = 0; b < SOFTWARE_DSP_PEAK_BANDS; b++) {
-      l = run_biquad(&s_eq[b], l, 0);
-      r = run_biquad(&s_eq[b], r, 1);
+    if (s_cfg.enabled) {
+      for (int b = 0; b < SOFTWARE_DSP_PEAK_BANDS; b++) {
+        l = run_biquad(&s_eq[b], l, 0);
+        r = run_biquad(&s_eq[b], r, 1);
+      }
+      l = run_biquad(&s_crossover, l, 0);
+      r = run_biquad(&s_crossover, r, 1);
     }
-    l = run_biquad(&s_crossover, l, 0);
-    r = run_biquad(&s_crossover, r, 1);
-    if (s_cfg.limiter_enabled) {
-      const float threshold = 32112.0f;
+    if (fabsf(l) > 32767.0f || fabsf(r) > 32767.0f) s_clipping_count++;
+    if ((s_cfg.enabled && s_cfg.limiter_enabled) || s_speaker_protection) {
+      const float threshold = s_speaker_protection
+          ? 32767.0f * ((float)s_speaker_threshold_percent / 100.0f)
+          : 32112.0f;
       if (fabsf(l) > threshold || fabsf(r) > threshold) s_limiter_count++;
       l = threshold * tanhf(l / threshold);
       r = threshold * tanhf(r / threshold);
@@ -225,3 +243,33 @@ void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
 }
 
 uint32_t software_dsp_limiter_count(void) { return s_limiter_count; }
+
+uint32_t software_dsp_clipping_count(void) { return s_clipping_count; }
+
+bool software_dsp_limiter_active(void) {
+  return (s_cfg.enabled && s_cfg.limiter_enabled) || s_speaker_protection;
+}
+
+bool software_dsp_speaker_protection_enabled(void) {
+  return s_speaker_protection;
+}
+
+uint8_t software_dsp_speaker_threshold_percent(void) {
+  return s_speaker_threshold_percent;
+}
+
+void software_dsp_set_speaker_protection(bool enabled,
+                                         uint8_t threshold_percent) {
+  if (threshold_percent < 50) threshold_percent = 50;
+  if (threshold_percent > 98) threshold_percent = 98;
+  if (!s_lock) return;
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  s_speaker_protection = enabled;
+  s_speaker_threshold_percent = threshold_percent;
+  xSemaphoreGive(s_lock);
+}
+
+void software_dsp_reset_protection_counters(void) {
+  s_limiter_count = 0;
+  s_clipping_count = 0;
+}

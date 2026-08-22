@@ -45,3 +45,10 @@ void software_dsp_get_config(software_dsp_config_t *config);
 esp_err_t software_dsp_set_config(const software_dsp_config_t *config);
 void software_dsp_process(int16_t *pcm, size_t frames, int channels);
 uint32_t software_dsp_limiter_count(void);
+uint32_t software_dsp_clipping_count(void);
+bool software_dsp_limiter_active(void);
+bool software_dsp_speaker_protection_enabled(void);
+uint8_t software_dsp_speaker_threshold_percent(void);
+void software_dsp_set_speaker_protection(bool enabled,
+                                         uint8_t threshold_percent);
+void software_dsp_reset_protection_counters(void);
