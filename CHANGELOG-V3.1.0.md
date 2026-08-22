@@ -9,6 +9,15 @@
 - Quick DSP selections for DSP off, night mode, mono and speech filtering.
 - One-click download of the current diagnostic report as JSON.
 - Accurate muted status for both AirPlay and DLNA sources.
+- The provisioning Wi-Fi network is named `AirPlay and DLNA Setup`.
+- The control panel heading is `AirPlay 2 and DLNA+ Receiver`, and interface
+  descriptions no longer use the ESP/ESP32 product wording.
+- Five visible EQ sliders at 80 Hz, 250 Hz, 1 kHz, 4 kHz and 12 kHz, each with
+  a -12 dB to +12 dB range.
+- Flat, Bass Boost, Loudness, Vocal, Rock, Pop, Jazz, Classical and Night EQ
+  presets, plus a persistent custom preset action.
+- Positive EQ boosts automatically enable the limiter to reduce clipping.
+- Playback controls now include recognisable play, track, volume and mute icons.
 
 ## Compatibility and stability
 

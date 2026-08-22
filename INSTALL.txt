@@ -1,29 +1,35 @@
-AirPlay and DLNA Receiver v3.1.0 cumulative replacement
-========================================================
+AirPlay 2 and DLNA+ Receiver v3.1.0 cumulative replacement
+===========================================================
 
-Control-panel text changes
---------------------------
+New controls
+------------
 
-Top heading:
+- Five EQ sliders: 80 Hz, 250 Hz, 1 kHz, 4 kHz and 12 kHz.
+- Each slider supports -12 dB to +12 dB in 0.5 dB steps.
+- Bass Boost, Loudness and Flat/Reset buttons.
+- Flat, Bass Boost, Loudness, Vocal, Rock, Pop, Jazz, Classical and Night
+  presets.
+- Save Custom Preset stores the current DSP settings in device NVS, so they
+  return after restart.
+- Any positive EQ boost automatically enables the limiter.
+- Playback controls include icons for Play/Pause, Previous, Next, Volume Down,
+  Volume Up and Mute.
 
-  AirPlay 2 and DLNA+ Receiver
-  Configuration Panel
+This cumulative package also retains:
 
-System Logs description:
-
-  Live log output via WebSocket
-
-This package also retains the earlier `AirPlay and DLNA Setup` provisioning
-Wi-Fi name and the self-contained GitHub BIN workflow.
+- `AirPlay 2 and DLNA+ Receiver` / `Configuration Panel` heading.
+- `Live log output via WebSocket` wording.
+- `AirPlay and DLNA Setup` provisioning Wi-Fi name.
+- Self-contained GitHub BIN workflow without a missing helper script.
 
 Installation
 ------------
 
 1. Extract this ZIP into the ROOT of the GitHub repository.
-2. Allow Windows to replace all existing files while retaining the folders.
-3. Commit all changes in GitHub Desktop and push to origin.
+2. Allow Windows to replace all existing files and retain the folders.
+3. Commit every changed file in GitHub Desktop and push to origin.
 4. Run GitHub Actions > Build ESP32-S3 installation BIN.
-5. Download and install the newly generated v3.1.0 BIN artifact.
+5. Download and install the newly generated v3.1.0 artifact.
 
-The text is stored in the SPIFFS web image, so rebuilding and flashing the new
-firmware is required. The firmware version remains 3.1.0.
+The controls are available at http://DEVICE-IP/advanced after flashing. The
+firmware version remains 3.1.0.
