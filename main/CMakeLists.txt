@@ -45,6 +45,7 @@ set( SRC_FILES
     "playback_control.c"
     "source_manager.c"
     "system_monitor.c"
+    "maintenance.c"
     "optional_backends.c"
     "dacp_client.c"
     "audio/software_dsp.c"

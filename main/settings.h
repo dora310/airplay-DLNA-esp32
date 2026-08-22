@@ -147,6 +147,32 @@ esp_err_t settings_set_web_password(const char *password);
 bool settings_web_password_is_set(void);
 bool settings_verify_web_password(const char *password);
 
+/** Export/import the stored password digest for authenticated backups. */
+esp_err_t settings_get_web_password_digest(uint8_t digest[32]);
+esp_err_t settings_set_web_password_digest(const uint8_t digest[32]);
+
+// ---- v3.2 maintenance and user-interface preferences ----
+
+typedef enum {
+  SETTINGS_THEME_AUTO = 0,
+  SETTINGS_THEME_DARK,
+  SETTINGS_THEME_LIGHT,
+} settings_theme_t;
+
+typedef struct {
+  bool speaker_protection_enabled;
+  uint8_t speaker_threshold_percent; /* 50..98 % of full scale */
+  bool scheduled_restart_enabled;
+  uint16_t scheduled_restart_hours; /* uptime interval; restart waits for idle */
+  settings_theme_t theme;
+} settings_maintenance_t;
+
+esp_err_t settings_get_maintenance(settings_maintenance_t *config);
+esp_err_t settings_set_maintenance(const settings_maintenance_t *config);
+
+/** Erase all receiver settings, including Wi-Fi and the access password. */
+esp_err_t settings_factory_reset(void);
+
 // ---- Internet-radio presets ----
 
 #define SETTINGS_RADIO_PRESET_COUNT 8

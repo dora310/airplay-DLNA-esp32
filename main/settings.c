@@ -20,6 +20,7 @@ static const char *TAG = "settings";
 #define NVS_KEY_EQ_GAINS       "eq_gains"
 #define NVS_KEY_LED_BRIGHTNESS "led_bright"
 #define NVS_KEY_WEB_PASSWORD   "web_pw_sha"
+#define NVS_KEY_MAINTENANCE    "maint_v1"
 
 #define MAX_WIFI_SSID_LEN     32
 #define MAX_WIFI_PASSWORD_LEN 64
@@ -504,6 +505,94 @@ bool settings_verify_web_password(const char *password) {
   uint8_t difference = 0;
   for (size_t i = 0; i < sizeof(expected); i++) difference |= expected[i] ^ actual[i];
   return difference == 0;
+}
+
+esp_err_t settings_get_web_password_digest(uint8_t digest[32]) {
+  if (!digest) return ESP_ERR_INVALID_ARG;
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) return err;
+  size_t size = 32;
+  err = nvs_get_blob(nvs, NVS_KEY_WEB_PASSWORD, digest, &size);
+  nvs_close(nvs);
+  return err == ESP_OK && size == 32 ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t settings_set_web_password_digest(const uint8_t digest[32]) {
+  if (!digest) return ESP_ERR_INVALID_ARG;
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  err = nvs_set_blob(nvs, NVS_KEY_WEB_PASSWORD, digest, 32);
+  if (err == ESP_OK) err = nvs_commit(nvs);
+  nvs_close(nvs);
+  return err;
+}
+
+static void maintenance_defaults(settings_maintenance_t *config) {
+  memset(config, 0, sizeof(*config));
+  config->speaker_threshold_percent = 90;
+  config->scheduled_restart_hours = 24;
+  config->theme = SETTINGS_THEME_AUTO;
+}
+
+static void maintenance_sanitize(settings_maintenance_t *config) {
+  if (config->speaker_threshold_percent < 50 ||
+      config->speaker_threshold_percent > 98) {
+    config->speaker_threshold_percent = 90;
+  }
+  if (config->scheduled_restart_hours < 1 ||
+      config->scheduled_restart_hours > 720) {
+    config->scheduled_restart_hours = 24;
+  }
+  if (config->theme < SETTINGS_THEME_AUTO ||
+      config->theme > SETTINGS_THEME_LIGHT) {
+    config->theme = SETTINGS_THEME_AUTO;
+  }
+}
+
+esp_err_t settings_get_maintenance(settings_maintenance_t *config) {
+  if (!config) return ESP_ERR_INVALID_ARG;
+  maintenance_defaults(config);
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) return ESP_OK;
+  size_t size = sizeof(*config);
+  settings_maintenance_t saved;
+  err = nvs_get_blob(nvs, NVS_KEY_MAINTENANCE, &saved, &size);
+  nvs_close(nvs);
+  if (err == ESP_OK && size == sizeof(saved)) *config = saved;
+  maintenance_sanitize(config);
+  return ESP_OK;
+}
+
+esp_err_t settings_set_maintenance(const settings_maintenance_t *config) {
+  if (!config) return ESP_ERR_INVALID_ARG;
+  settings_maintenance_t value = *config;
+  maintenance_sanitize(&value);
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  err = nvs_set_blob(nvs, NVS_KEY_MAINTENANCE, &value, sizeof(value));
+  if (err == ESP_OK) err = nvs_commit(nvs);
+  nvs_close(nvs);
+  return err;
+}
+
+esp_err_t settings_factory_reset(void) {
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  err = nvs_erase_all(nvs);
+  if (err == ESP_OK) err = nvs_commit(nvs);
+  nvs_close(nvs);
+  if (err == ESP_OK) {
+    g_volume_db = -15.0f;
+    g_volume_loaded = false;
+    memset(g_eq_gains, 0, sizeof(g_eq_gains));
+    g_eq_loaded = false;
+  }
+  return err;
 }
 
 esp_err_t settings_get_radio_preset(uint8_t slot,

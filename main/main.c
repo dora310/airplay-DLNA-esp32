@@ -24,6 +24,7 @@
 #include "mqtt_control.h"
 #include "optional_backends.h"
 #include "software_dsp.h"
+#include "maintenance.h"
 
 #ifdef CONFIG_BT_A2DP_ENABLE
 #include "a2dp_sink.h"
@@ -303,6 +304,11 @@ void app_main(void) {
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Source manager unavailable: %s", esp_err_to_name(err));
   }
+  err = maintenance_init();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Maintenance supervisor unavailable: %s",
+             esp_err_to_name(err));
+  }
   err = system_monitor_init();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "System monitor unavailable: %s", esp_err_to_name(err));
@@ -310,6 +316,7 @@ void app_main(void) {
 
   // Start services that work on any interface
   ESP_ERROR_CHECK(web_server_start(80));
+  maintenance_mark_services_ready();
   esp_err_t dlna_err =
       dlna_renderer_register(web_server_get_handle(), 80);
   if (dlna_err != ESP_OK) {
