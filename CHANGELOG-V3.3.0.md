@@ -16,6 +16,9 @@
 - New `/reliability` control page and JSON APIs.
 - Build fix: increase the Home Assistant MQTT discovery buffer so maximum
   device/topic names compile safely with `-Werror=format-truncation`.
+- New Apple-inspired Liquid Glass interface across the main panel, advanced
+  controls, reliability, equalizer, logs and speed-test pages. Includes matched
+  light/dark modes, mobile layouts and reduced-motion accessibility support.
 
 ## Compatibility
 
