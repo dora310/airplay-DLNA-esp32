@@ -366,17 +366,53 @@ static bool has_extension(const char *uri, const char *extension) {
 static esp_audio_simple_dec_type_t detect_decoder_type(const char *uri,
                                                         const uint8_t *data,
                                                         size_t len) {
+  /* Container signatures are checked before extensions. Windows DLNA often
+   * serves media through extensionless URLs. */
   if (len >= 4 && !memcmp(data, "fLaC", 4)) {
     return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
   }
   if (len >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WAVE", 4)) {
     return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
   }
+  if (len >= 12 && !memcmp(data + 4, "ftyp", 4)) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
+  }
+  if (len >= 4 && !memcmp(data, "OggS", 4)) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
+  }
+  if (len >= 9 && !memcmp(data, "#!AMR-WB\n", 9)) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AMRWB;
+  }
+  if (len >= 6 && !memcmp(data, "#!AMR\n", 6)) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AMRNB;
+  }
+  /* ADTS AAC uses a 12-bit sync word, a variable MPEG-ID bit and layer 00.
+   * Check it before the more general MPEG audio sync used for MP3. */
+  if (len >= 2 && data[0] == 0xff && (data[1] & 0xf6) == 0xf0) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+  }
   if (has_extension(uri, ".flac")) {
     return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
   }
   if (has_extension(uri, ".wav")) {
     return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
+  }
+  if (has_extension(uri, ".aac") || has_extension(uri, ".adts")) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+  }
+  if (has_extension(uri, ".m4a") || has_extension(uri, ".m4b") ||
+      has_extension(uri, ".mp4")) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
+  }
+  if (has_extension(uri, ".ogg") || has_extension(uri, ".oga") ||
+      has_extension(uri, ".opus")) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
+  }
+  if (has_extension(uri, ".awb") || has_extension(uri, ".amrwb")) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AMRWB;
+  }
+  if (has_extension(uri, ".amr") || has_extension(uri, ".amrnb")) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_AMRNB;
   }
   if (has_extension(uri, ".mp3") || (len >= 3 && !memcmp(data, "ID3", 3)) ||
       (len >= 2 && data[0] == 0xff && (data[1] & 0xe0) == 0xe0)) {
@@ -393,6 +429,16 @@ static const char *decoder_name(esp_audio_simple_dec_type_t type) {
     return "FLAC";
   case ESP_AUDIO_SIMPLE_DEC_TYPE_WAV:
     return "WAV";
+  case ESP_AUDIO_SIMPLE_DEC_TYPE_AAC:
+    return "AAC";
+  case ESP_AUDIO_SIMPLE_DEC_TYPE_M4A:
+    return "M4A";
+  case ESP_AUDIO_SIMPLE_DEC_TYPE_OGG:
+    return "OGG/Vorbis/Opus";
+  case ESP_AUDIO_SIMPLE_DEC_TYPE_AMRNB:
+    return "AMR-NB";
+  case ESP_AUDIO_SIMPLE_DEC_TYPE_AMRWB:
+    return "AMR-WB";
   default:
     return "UNKNOWN";
   }
@@ -780,7 +826,11 @@ static esp_err_t connection_control_handler(httpd_req_t *req) {
              "<Source></Source><Sink>http-get:*:audio/mpeg:*,"
              "http-get:*:audio/mp3:*,http-get:*:audio/flac:*,"
              "http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,"
-             "http-get:*:audio/x-wav:*</Sink>");
+             "http-get:*:audio/x-wav:*,http-get:*:audio/aac:*,"
+             "http-get:*:audio/aacp:*,http-get:*:audio/mp4:*,"
+             "http-get:*:audio/x-m4a:*,http-get:*:audio/ogg:*,"
+             "http-get:*:application/ogg:*,http-get:*:audio/opus:*,"
+             "http-get:*:audio/amr:*,http-get:*:audio/amr-wb:*</Sink>");
   } else if (!strcmp(action_copy, "GetCurrentConnectionIDs")) {
     snprintf(args, sizeof(args), "<ConnectionIDs>0</ConnectionIDs>");
   } else if (!strcmp(action_copy, "GetCurrentConnectionInfo")) {
@@ -1025,7 +1075,9 @@ esp_err_t dlna_renderer_register(httpd_handle_t server, uint16_t server_port) {
     }
   }
 
-  ESP_LOGI(TAG, "DLNA added beside official AirPlay (MP3/FLAC/WAV)");
+  ESP_LOGI(TAG,
+           "DLNA added beside official AirPlay "
+           "(MP3/FLAC/WAV/AAC/M4A/OGG/OPUS/AMR)");
   return ESP_OK;
 }
 
