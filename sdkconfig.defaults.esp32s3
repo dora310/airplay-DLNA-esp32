@@ -64,3 +64,4 @@ CONFIG_I2S_GND_IO=14
 # CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 #
 # See components/display/README.md for full setup instructions.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
