@@ -40,6 +40,8 @@ jobs:
           esp_idf_version: v5.5
           target: ${{ matrix.target }}
           command: >
+            rm -f sdkconfig sdkconfig.old &&
+            rm -rf build &&
             idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig }}" build &&
             cd build &&
             esptool.py --chip ${{ matrix.target }} merge_bin --format raw -o merged-firmware.bin $(cat flash_args) &&
