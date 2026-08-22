@@ -1,30 +1,29 @@
-AirPlay and DLNA Receiver v3.1.0 replacement files
-==================================================
+AirPlay and DLNA Receiver v3.1.0 cumulative replacement
+========================================================
 
-This update changes the setup/provisioning Wi-Fi network from:
+Control-panel text changes
+--------------------------
 
-  ESP32-AirPlay-Setup
+Top heading:
 
-to:
+  AirPlay 2 and DLNA+ Receiver
+  Configuration Panel
 
-  AirPlay and DLNA Setup
+System Logs description:
+
+  Live log output via WebSocket
+
+This package also retains the earlier `AirPlay and DLNA Setup` provisioning
+Wi-Fi name and the self-contained GitHub BIN workflow.
 
 Installation
 ------------
 
 1. Extract this ZIP into the ROOT of the GitHub repository.
-2. Allow Windows to replace the existing files and retain the folders.
-3. Confirm this active workflow exists:
+2. Allow Windows to replace all existing files while retaining the folders.
+3. Commit all changes in GitHub Desktop and push to origin.
+4. Run GitHub Actions > Build ESP32-S3 installation BIN.
+5. Download and install the newly generated v3.1.0 BIN artifact.
 
-     .github/workflows/build-esp32s3-bin.yml
-
-4. Commit every changed file in GitHub Desktop and push to origin.
-5. In GitHub, run Actions > Build ESP32-S3 installation BIN.
-6. Download the newly generated v3.1.0 artifact.
-7. For a fresh installation, erase the ESP32-S3 and flash the new
-   *-install.bin at address 0x0.
-
-The AirPlay/DLNA advertised names, audio paths, Wi-Fi connection logic and
-firmware version remain unchanged. Only the provisioning SSID and its displayed
-instructions are changed. The included workflow is the self-contained version
-that does not require .github/scripts/build-esp32s3.sh.
+The text is stored in the SPIFFS web image, so rebuilding and flashing the new
+firmware is required. The firmware version remains 3.1.0.
