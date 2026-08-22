@@ -25,6 +25,32 @@ static float clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static void sanitize_config(software_dsp_config_t *config) {
+  config->balance = clampf(config->balance, -1.0f, 1.0f);
+  config->normalization_target_dbfs =
+      clampf(config->normalization_target_dbfs, -30.0f, -3.0f);
+  if (config->channel < DSP_CHANNEL_STEREO ||
+      config->channel > DSP_CHANNEL_SWAP) {
+    config->channel = DSP_CHANNEL_STEREO;
+  }
+  if (config->crossover < DSP_CROSSOVER_OFF ||
+      config->crossover > DSP_CROSSOVER_LOW_PASS) {
+    config->crossover = DSP_CROSSOVER_OFF;
+  }
+  config->crossover_hz =
+      clampf(config->crossover_hz, 30.0f, s_rate * 0.40f);
+  bool boosted = false;
+  for (int i = 0; i < SOFTWARE_DSP_PEAK_BANDS; i++) {
+    config->bands[i].frequency_hz =
+        clampf(config->bands[i].frequency_hz, 20.0f, s_rate * 0.45f);
+    config->bands[i].gain_db =
+        clampf(config->bands[i].gain_db, -12.0f, 12.0f);
+    config->bands[i].q = clampf(config->bands[i].q, 0.1f, 12.0f);
+    if (config->bands[i].gain_db > 0.01f) boosted = true;
+  }
+  if (boosted) config->limiter_enabled = true;
+}
+
 static void make_bypass(biquad_t *b) {
   memset(b, 0, sizeof(*b));
   b->b0 = 1.0f;
@@ -103,6 +129,7 @@ esp_err_t software_dsp_init(uint32_t sample_rate) {
     }
     nvs_close(nvs);
   }
+  sanitize_config(&s_cfg);
   rebuild();
   return ESP_OK;
 }
@@ -126,9 +153,7 @@ esp_err_t software_dsp_set_config(const software_dsp_config_t *config) {
   if (!config || !s_lock) return ESP_ERR_INVALID_ARG;
   xSemaphoreTake(s_lock, portMAX_DELAY);
   s_cfg = *config;
-  s_cfg.balance = clampf(s_cfg.balance, -1.0f, 1.0f);
-  s_cfg.normalization_target_dbfs =
-      clampf(s_cfg.normalization_target_dbfs, -30.0f, -3.0f);
+  sanitize_config(&s_cfg);
   rebuild();
   nvs_handle_t nvs;
   if (nvs_open("airplay", NVS_READWRITE, &nvs) == ESP_OK) {
