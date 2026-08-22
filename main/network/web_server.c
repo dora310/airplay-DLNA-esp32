@@ -99,6 +99,10 @@ static esp_err_t advanced_page_handler(httpd_req_t *req) {
   return serve_spiffs_file(req, "/spiffs/www/advanced.html", "text/html");
 }
 
+static esp_err_t reliability_page_handler(httpd_req_t *req) {
+  return serve_spiffs_file(req, "/spiffs/www/reliability.html", "text/html");
+}
+
 // Tiny endpoint used by JS for RTT timing. Returns minimal body.
 static esp_err_t speedtest_ping_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/plain");
@@ -809,7 +813,7 @@ esp_err_t web_server_start(uint16_t port) {
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
   config.max_uri_handlers =
-      64; // Captive portal + v3.2 maintenance API + EQ + speedtest + DLNA
+      64; // Captive portal + v3.3 reliability API + EQ + speedtest + DLNA
   config.max_resp_headers = 8;
   config.stack_size = 8192;
   config.uri_match_fn = httpd_uri_match_wildcard;
@@ -842,6 +846,11 @@ esp_err_t web_server_start(uint16_t port) {
                                     .method = HTTP_GET,
                                     .handler = advanced_page_handler};
   httpd_register_uri_handler(s_server, &advanced_page_uri);
+
+  httpd_uri_t reliability_page_uri = {.uri = "/reliability",
+                                      .method = HTTP_GET,
+                                      .handler = reliability_page_handler};
+  httpd_register_uri_handler(s_server, &reliability_page_uri);
 
   httpd_uri_t speedtest_ping_uri = {.uri = "/api/speedtest/ping",
                                     .method = HTTP_GET,

@@ -1,6 +1,7 @@
 #include "web_api_v3.h"
 
 #include "audio/software_dsp.h"
+#include "audio/audio_test.h"
 #include "cJSON.h"
 #include "dlna_renderer.h"
 #include "esp_app_desc.h"
@@ -13,6 +14,9 @@
 #include "led.h"
 #include "log_stream.h"
 #include "maintenance.h"
+#include "mqtt_control.h"
+#include "github_ota.h"
+#include "recovery.h"
 #include "playback_control.h"
 #include "settings.h"
 #include "source_manager.h"
@@ -101,6 +105,8 @@ static esp_err_t status_get(httpd_req_t *req) {
   cJSON_AddNumberToObject(j, "uptime_seconds", h.uptime_seconds);
   cJSON_AddNumberToObject(j, "free_heap", h.free_heap);
   cJSON_AddBoolToObject(j, "password_set", settings_web_password_is_set());
+  cJSON_AddBoolToObject(j, "safe_mode", recovery_is_safe_mode());
+  cJSON_AddNumberToObject(j, "settings_schema", settings_schema_version());
   esp_err_t err = send_json(req, j);
   cJSON_Delete(j);
   return err;
@@ -497,6 +503,17 @@ static esp_err_t backup_get(httpd_req_t *req) {
   cJSON *maintenance_json = cJSON_AddObjectToObject(root, "maintenance");
   maintenance_to_json(maintenance_json, &maintenance);
 
+  settings_mqtt_t mqtt;
+  settings_get_mqtt(&mqtt);
+  cJSON *mqtt_json = cJSON_AddObjectToObject(root, "mqtt");
+  cJSON_AddBoolToObject(mqtt_json, "enabled", mqtt.enabled);
+  cJSON_AddBoolToObject(mqtt_json, "home_assistant_discovery",
+                        mqtt.home_assistant_discovery);
+  cJSON_AddStringToObject(mqtt_json, "broker_uri", mqtt.broker_uri);
+  cJSON_AddStringToObject(mqtt_json, "username", mqtt.username);
+  cJSON_AddStringToObject(mqtt_json, "password", mqtt.password);
+  cJSON_AddStringToObject(mqtt_json, "topic_prefix", mqtt.topic_prefix);
+
   cJSON *presets = cJSON_AddArrayToObject(root, "radio_presets");
   for (uint8_t slot = 0; slot < SETTINGS_RADIO_PRESET_COUNT; slot++) {
     settings_radio_preset_t preset;
@@ -599,6 +616,20 @@ static esp_err_t backup_restore_post(httpd_req_t *req) {
         settings_set_radio_preset((uint8_t)slot->valueint,name->valuestring,url->valuestring);
     }
   }
+  cJSON *mqtt_json = cJSON_GetObjectItem(root, "mqtt");
+  if (result == ESP_OK && cJSON_IsObject(mqtt_json)) {
+    settings_mqtt_t mqtt;
+    settings_get_mqtt(&mqtt);
+    v=cJSON_GetObjectItem(mqtt_json,"enabled"); if(cJSON_IsBool(v)) mqtt.enabled=cJSON_IsTrue(v);
+    v=cJSON_GetObjectItem(mqtt_json,"home_assistant_discovery"); if(cJSON_IsBool(v)) mqtt.home_assistant_discovery=cJSON_IsTrue(v);
+#define RESTORE_MQTT_STRING(name, field) do { v=cJSON_GetObjectItem(mqtt_json,name); if(cJSON_IsString(v)) strlcpy(mqtt.field,v->valuestring,sizeof(mqtt.field)); } while(0)
+    RESTORE_MQTT_STRING("broker_uri", broker_uri);
+    RESTORE_MQTT_STRING("username", username);
+    RESTORE_MQTT_STRING("password", password);
+    RESTORE_MQTT_STRING("topic_prefix", topic_prefix);
+#undef RESTORE_MQTT_STRING
+    result = settings_set_mqtt(&mqtt);
+  }
   cJSON *password_set = cJSON_GetObjectItem(root, "web_password_set");
   v = cJSON_GetObjectItem(root, "web_password_sha256");
   if (result == ESP_OK && cJSON_IsFalse(password_set)) {
@@ -625,7 +656,10 @@ static esp_err_t factory_reset_post(httpd_req_t *req) {
   bool confirmed = cJSON_IsString(confirmation) &&
                    strcmp(confirmation->valuestring, "ERASE ALL SETTINGS") == 0;
   esp_err_t result = confirmed ? settings_factory_reset() : ESP_ERR_INVALID_ARG;
-  if (result == ESP_OK) log_stream_clear_persistent();
+  if (result == ESP_OK) {
+    log_stream_clear_persistent();
+    recovery_clear();
+  }
   cJSON *out = cJSON_CreateObject();
   cJSON_AddBoolToObject(out, "success", result == ESP_OK);
   if (!confirmed) cJSON_AddStringToObject(out, "error",
@@ -648,6 +682,224 @@ static esp_err_t password_post(httpd_req_t *req) {
   cJSON *out=cJSON_CreateObject(); cJSON_AddBoolToObject(out,"success",result==ESP_OK);
   if(result!=ESP_OK) cJSON_AddStringToObject(out,"error","Password must be empty or 8-64 characters");
   esp_err_t err=send_json(req,out); cJSON_Delete(out); cJSON_Delete(j); return err;
+}
+
+static esp_err_t recovery_get(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  recovery_status_t status;
+  recovery_get_status(&status);
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", true);
+  cJSON_AddBoolToObject(out, "safe_mode", status.safe_mode);
+  cJSON_AddBoolToObject(out, "forced", status.forced);
+  cJSON_AddNumberToObject(out, "consecutive_crashes", status.consecutive_crashes);
+  cJSON_AddNumberToObject(out, "reset_reason", status.reset_reason);
+  cJSON_AddNumberToObject(out, "settings_schema", settings_schema_version());
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  return err;
+}
+
+static esp_err_t recovery_post(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *in = read_json(req);
+  cJSON *action = in ? cJSON_GetObjectItem(in, "action") : NULL;
+  esp_err_t result = ESP_ERR_INVALID_ARG;
+  if (cJSON_IsString(action)) {
+    if (!strcmp(action->valuestring, "clear")) result = recovery_clear();
+    else if (!strcmp(action->valuestring, "force"))
+      result = recovery_force_safe_mode(true);
+    else if (!strcmp(action->valuestring, "normal"))
+      result = recovery_force_safe_mode(false);
+  }
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", result == ESP_OK);
+  cJSON_AddBoolToObject(out, "restart_required", result == ESP_OK);
+  if (result != ESP_OK) cJSON_AddStringToObject(out, "error", "Invalid recovery action");
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  cJSON_Delete(in);
+  return err;
+}
+
+static esp_err_t wifi_diagnostics_get(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  wifi_diagnostics_t d;
+  wifi_get_diagnostics(&d);
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", true);
+  cJSON_AddBoolToObject(out, "initialized", d.initialized);
+  cJSON_AddBoolToObject(out, "connected", d.connected);
+  cJSON_AddBoolToObject(out, "setup_ap_enabled", d.setup_ap_enabled);
+  cJSON_AddBoolToObject(out, "pending_credential_test", d.pending_credential_test);
+  cJSON_AddNumberToObject(out, "retry_count", d.retry_count);
+  cJSON_AddNumberToObject(out, "last_disconnect_reason", d.last_disconnect_reason);
+  cJSON_AddNumberToObject(out, "rssi", d.rssi);
+  cJSON_AddNumberToObject(out, "channel", d.channel);
+  cJSON_AddStringToObject(out, "ssid", d.ssid);
+  cJSON_AddStringToObject(out, "bssid", d.bssid);
+  cJSON_AddStringToObject(out, "ip", d.ip);
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  return err;
+}
+
+static esp_err_t wifi_test_post(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *in = read_json(req);
+  cJSON *ssid = in ? cJSON_GetObjectItem(in, "ssid") : NULL;
+  cJSON *password = in ? cJSON_GetObjectItem(in, "password") : NULL;
+  wifi_credential_check_t check;
+  memset(&check, 0, sizeof(check));
+  esp_err_t result = cJSON_IsString(ssid) && cJSON_IsString(password)
+                         ? wifi_check_credentials(ssid->valuestring,
+                                                  password->valuestring, &check)
+                         : ESP_ERR_INVALID_ARG;
+  bool staged = false;
+  if (result == ESP_OK && check.network_visible &&
+      check.password_format_valid && !check.already_connected) {
+    result = settings_set_pending_wifi_credentials(ssid->valuestring,
+                                                   password->valuestring);
+    staged = result == ESP_OK;
+  }
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", result == ESP_OK);
+  cJSON_AddBoolToObject(out, "network_visible", check.network_visible);
+  cJSON_AddBoolToObject(out, "password_format_valid", check.password_format_valid);
+  cJSON_AddBoolToObject(out, "already_connected", check.already_connected);
+  cJSON_AddBoolToObject(out, "staged", staged);
+  cJSON_AddBoolToObject(out, "restart_required", staged);
+  cJSON_AddNumberToObject(out, "rssi", check.rssi);
+  cJSON_AddNumberToObject(out, "channel", check.channel);
+  cJSON_AddNumberToObject(out, "authmode", check.authmode);
+  cJSON_AddStringToObject(out, "message", check.message);
+  if (result != ESP_OK) cJSON_AddStringToObject(out, "error", esp_err_to_name(result));
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  cJSON_Delete(in);
+  return err;
+}
+
+static void mqtt_to_json(cJSON *out, const settings_mqtt_t *config) {
+  mqtt_control_status_t status;
+  mqtt_control_get_status(&status);
+  cJSON_AddBoolToObject(out, "enabled", config->enabled);
+  cJSON_AddBoolToObject(out, "home_assistant_discovery",
+                        config->home_assistant_discovery);
+  cJSON_AddStringToObject(out, "broker_uri", config->broker_uri);
+  cJSON_AddStringToObject(out, "username", config->username);
+  cJSON_AddStringToObject(out, "topic_prefix", config->topic_prefix);
+  cJSON_AddBoolToObject(out, "password_set", config->password[0] != '\0');
+  cJSON_AddBoolToObject(out, "connected", status.connected);
+  cJSON_AddNumberToObject(out, "last_error", status.last_error);
+}
+
+static esp_err_t mqtt_get(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  settings_mqtt_t config;
+  settings_get_mqtt(&config);
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", true);
+  mqtt_to_json(out, &config);
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  return err;
+}
+
+static esp_err_t mqtt_post(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *in = read_json(req);
+  settings_mqtt_t config;
+  settings_get_mqtt(&config);
+  cJSON *v = in ? cJSON_GetObjectItem(in, "enabled") : NULL;
+  if (cJSON_IsBool(v)) config.enabled = cJSON_IsTrue(v);
+  v = in ? cJSON_GetObjectItem(in, "home_assistant_discovery") : NULL;
+  if (cJSON_IsBool(v)) config.home_assistant_discovery = cJSON_IsTrue(v);
+#define MQTT_STRING(name, field) do { v=in?cJSON_GetObjectItem(in,name):NULL; if(cJSON_IsString(v)) strlcpy(config.field,v->valuestring,sizeof(config.field)); } while(0)
+  MQTT_STRING("broker_uri", broker_uri);
+  MQTT_STRING("username", username);
+  MQTT_STRING("topic_prefix", topic_prefix);
+  MQTT_STRING("password", password);
+#undef MQTT_STRING
+  esp_err_t result = settings_set_mqtt(&config);
+  if (result == ESP_OK && !recovery_is_safe_mode()) result = mqtt_control_reload();
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", result == ESP_OK);
+  if (result == ESP_OK) mqtt_to_json(out, &config);
+  else cJSON_AddStringToObject(out, "error", esp_err_to_name(result));
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  cJSON_Delete(in);
+  return err;
+}
+
+static esp_err_t audio_test_post(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *in = read_json(req);
+  cJSON *channel = in ? cJSON_GetObjectItem(in, "channel") : NULL;
+  cJSON *frequency = in ? cJSON_GetObjectItem(in, "frequency_hz") : NULL;
+  cJSON *duration = in ? cJSON_GetObjectItem(in, "duration_ms") : NULL;
+  esp_err_t result = ESP_ERR_INVALID_ARG;
+  if (cJSON_IsNumber(channel) && cJSON_IsNumber(frequency) &&
+      cJSON_IsNumber(duration)) {
+    result = audio_test_start((audio_test_channel_t)channel->valueint,
+                              (uint16_t)frequency->valueint,
+                              (uint16_t)duration->valueint);
+  }
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", result == ESP_OK);
+  cJSON_AddBoolToObject(out, "running", audio_test_is_running());
+  if (result != ESP_OK)
+    cJSON_AddStringToObject(out, "error",
+        result == ESP_ERR_INVALID_STATE ? "Audio must be idle and initialized" : esp_err_to_name(result));
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  cJSON_Delete(in);
+  return err;
+}
+
+static void github_status_json(cJSON *out) {
+  github_ota_status_t status;
+  github_ota_get_status(&status);
+  cJSON_AddNumberToObject(out, "state", status.state);
+  cJSON_AddBoolToObject(out, "update_available", status.update_available);
+  cJSON_AddNumberToObject(out, "progress_percent", status.progress_percent);
+  cJSON_AddStringToObject(out, "current_version", status.current_version);
+  cJSON_AddStringToObject(out, "latest_version", status.latest_version);
+  cJSON_AddStringToObject(out, "error", status.error);
+}
+
+static esp_err_t github_ota_get(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", true);
+  github_status_json(out);
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  return err;
+}
+
+static esp_err_t github_ota_post(httpd_req_t *req) {
+  if (require_auth(req) != ESP_OK) return ESP_OK;
+  cJSON *in = read_json(req);
+  cJSON *action = in ? cJSON_GetObjectItem(in, "action") : NULL;
+  esp_err_t result = ESP_ERR_INVALID_ARG;
+  if (cJSON_IsString(action)) {
+    if (!maintenance_audio_is_idle()) result = ESP_ERR_INVALID_STATE;
+    else if (!strcmp(action->valuestring, "check")) result = github_ota_check();
+    else if (!strcmp(action->valuestring, "install")) result = github_ota_install();
+  }
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "success", result == ESP_OK);
+  github_status_json(out);
+  if (result != ESP_OK) cJSON_AddStringToObject(
+      out, "request_error",
+      result == ESP_ERR_INVALID_STATE ? "Stop playback before checking or installing an update"
+                                      : esp_err_to_name(result));
+  esp_err_t err = send_json(req, out);
+  cJSON_Delete(out);
+  cJSON_Delete(in);
+  return err;
 }
 
 esp_err_t web_api_v3_register(httpd_handle_t s) {
@@ -679,6 +931,15 @@ esp_err_t web_api_v3_register(httpd_handle_t s) {
     {.uri="/api/v1/backup/restore", .method=HTTP_POST, .handler=backup_restore_post},
     {.uri="/api/v1/factory-reset", .method=HTTP_POST, .handler=factory_reset_post},
     {.uri="/api/v1/security/password", .method=HTTP_POST, .handler=password_post},
+    {.uri="/api/v1/recovery", .method=HTTP_GET, .handler=recovery_get},
+    {.uri="/api/v1/recovery", .method=HTTP_POST, .handler=recovery_post},
+    {.uri="/api/v1/wifi/diagnostics", .method=HTTP_GET, .handler=wifi_diagnostics_get},
+    {.uri="/api/v1/wifi/test", .method=HTTP_POST, .handler=wifi_test_post},
+    {.uri="/api/v1/mqtt", .method=HTTP_GET, .handler=mqtt_get},
+    {.uri="/api/v1/mqtt", .method=HTTP_POST, .handler=mqtt_post},
+    {.uri="/api/v1/audio/test", .method=HTTP_POST, .handler=audio_test_post},
+    {.uri="/api/v1/github-ota", .method=HTTP_GET, .handler=github_ota_get},
+    {.uri="/api/v1/github-ota", .method=HTTP_POST, .handler=github_ota_post},
   };
   for (size_t i=0; i<sizeof(routes)/sizeof(routes[0]); i++) {
     esp_err_t err=httpd_register_uri_handler(s,&routes[i]); if(err!=ESP_OK) return err;

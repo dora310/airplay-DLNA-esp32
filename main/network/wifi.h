@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "esp_wifi_types.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Keep the provisioning AP away from common home LAN ranges. The previous
  * 192.168.4.1 address overlapped networks using 192.168.4.0/22 and prevented
@@ -49,6 +50,36 @@ esp_err_t wifi_get_ip_str(char *ip_str, size_t len);
  * @return ESP_OK on success
  */
 esp_err_t wifi_scan(wifi_ap_record_t **ap_list, uint16_t *ap_count);
+
+typedef struct {
+  bool initialized;
+  bool connected;
+  bool setup_ap_enabled;
+  bool pending_credential_test;
+  int retry_count;
+  uint8_t last_disconnect_reason;
+  int8_t rssi;
+  uint8_t channel;
+  char ssid[33];
+  char bssid[18];
+  char ip[16];
+} wifi_diagnostics_t;
+
+typedef struct {
+  bool network_visible;
+  bool password_format_valid;
+  bool already_connected;
+  int8_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t authmode;
+  char message[128];
+} wifi_credential_check_t;
+
+void wifi_get_diagnostics(wifi_diagnostics_t *diagnostics);
+
+/** Non-disruptive scan and credential-format validation before staging. */
+esp_err_t wifi_check_credentials(const char *ssid, const char *password,
+                                 wifi_credential_check_t *result);
 
 /**
  * Disconnect and stop WiFi

@@ -35,6 +35,8 @@ static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
 static bool s_has_credentials = false;
 static bool s_bssid_set = false;
+static bool s_pending_credential_test = false;
+static uint8_t s_last_disconnect_reason = 0;
 static esp_timer_handle_t s_retry_timer = NULL;
 static SemaphoreHandle_t s_scan_mutex = NULL;
 
@@ -169,6 +171,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     s_sta_connected = false;
     wifi_event_sta_disconnected_t *disconnected =
         (wifi_event_sta_disconnected_t *)event_data;
+    s_last_disconnect_reason = disconnected->reason;
     ESP_LOGI(TAG, "Disconnected from AP, reason: %d", disconnected->reason);
 
     s_retry_num++;
@@ -194,6 +197,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
       esp_wifi_connect();
     } else {
       if (s_retry_num == AP_REENABLE_THRESHOLD) {
+        if (s_pending_credential_test) {
+          ESP_LOGE(TAG, "WiFi credential test failed; restoring previous network");
+          settings_clear_pending_wifi_credentials();
+          vTaskDelay(pdMS_TO_TICKS(250));
+          esp_restart();
+        }
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         ESP_LOGW(TAG,
                  "WiFi connection failed after %d attempts, switching to "
@@ -209,6 +218,15 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     s_retry_num = 0;
     s_sta_connected = true;
+    if (s_pending_credential_test) {
+      esp_err_t promote = settings_promote_pending_wifi_credentials();
+      if (promote == ESP_OK) {
+        s_pending_credential_test = false;
+      } else {
+        ESP_LOGE(TAG, "Could not commit tested WiFi credentials: %s",
+                 esp_err_to_name(promote));
+      }
+    }
     xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
     // Disable AP mode when STA connects
@@ -371,7 +389,13 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   char password[65] = {0};
   s_has_credentials = false;
 
-  if (settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK &&
+  s_pending_credential_test = settings_has_pending_wifi_credentials();
+  if (s_pending_credential_test &&
+      settings_get_pending_wifi_credentials(ssid, sizeof(ssid), password,
+                                            sizeof(password)) == ESP_OK) {
+    s_has_credentials = true;
+    ESP_LOGI(TAG, "Testing staged WiFi credentials for: %s", ssid);
+  } else if (settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK &&
       settings_get_wifi_password(password, sizeof(password)) == ESP_OK &&
       strlen(ssid) > 0) {
     s_has_credentials = true;
@@ -525,6 +549,89 @@ esp_err_t wifi_scan(wifi_ap_record_t **ap_list, uint16_t *ap_count) {
   *ap_count = number;
   xSemaphoreGive(s_scan_mutex);
   return ESP_OK;
+}
+
+static bool is_hex_password(const char *password) {
+  if (strlen(password) != 64) return false;
+  for (const char *p = password; *p; p++) {
+    if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+          (*p >= 'A' && *p <= 'F'))) return false;
+  }
+  return true;
+}
+
+esp_err_t wifi_check_credentials(const char *ssid, const char *password,
+                                 wifi_credential_check_t *result) {
+  if (!ssid || !ssid[0] || strlen(ssid) > 32 || !password || !result)
+    return ESP_ERR_INVALID_ARG;
+  memset(result, 0, sizeof(*result));
+  wifi_ap_record_t *aps = NULL;
+  uint16_t count = 0;
+  esp_err_t err = wifi_scan(&aps, &count);
+  if (err != ESP_OK) {
+    snprintf(result->message, sizeof(result->message), "Scan failed: %s",
+             esp_err_to_name(err));
+    return err;
+  }
+  wifi_ap_record_t *best = NULL;
+  for (uint16_t i = 0; i < count; i++) {
+    if (strcmp((char *)aps[i].ssid, ssid) == 0 &&
+        (!best || aps[i].rssi > best->rssi)) best = &aps[i];
+  }
+  if (best) {
+    result->network_visible = true;
+    result->rssi = best->rssi;
+    result->channel = best->primary;
+    result->authmode = best->authmode;
+    char current[33] = {0};
+    wifi_config_t cfg;
+    if (s_sta_connected && esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK) {
+      strlcpy(current, (char *)cfg.sta.ssid, sizeof(current));
+      char saved_password[65] = {0};
+      settings_get_wifi_password(saved_password, sizeof(saved_password));
+      result->already_connected = strcmp(current, ssid) == 0 &&
+                                  strcmp(saved_password, password) == 0;
+    }
+    size_t password_len = strlen(password);
+    result->password_format_valid =
+        best->authmode == WIFI_AUTH_OPEN ? password_len == 0
+                                        : ((password_len >= 8 && password_len <= 63) ||
+                                           is_hex_password(password));
+    snprintf(result->message, sizeof(result->message), "%s",
+             result->already_connected
+                 ? "Already connected: credentials are working"
+                 : result->password_format_valid
+                       ? "Network found; ready for transactional connection test"
+                       : "Password format does not match this network");
+  } else {
+    snprintf(result->message, sizeof(result->message),
+             "Network was not found during the scan");
+  }
+  free(aps);
+  return ESP_OK;
+}
+
+void wifi_get_diagnostics(wifi_diagnostics_t *diagnostics) {
+  if (!diagnostics) return;
+  memset(diagnostics, 0, sizeof(*diagnostics));
+  diagnostics->initialized = s_wifi_initialized;
+  diagnostics->connected = s_sta_connected;
+  diagnostics->pending_credential_test = s_pending_credential_test;
+  diagnostics->retry_count = s_retry_num;
+  diagnostics->last_disconnect_reason = s_last_disconnect_reason;
+  wifi_mode_t mode;
+  diagnostics->setup_ap_enabled =
+      esp_wifi_get_mode(&mode) == ESP_OK &&
+      (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
+  wifi_ap_record_t ap;
+  if (s_sta_connected && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    diagnostics->rssi = ap.rssi;
+    diagnostics->channel = ap.primary;
+    strlcpy(diagnostics->ssid, (char *)ap.ssid, sizeof(diagnostics->ssid));
+    snprintf(diagnostics->bssid, sizeof(diagnostics->bssid), MACSTR,
+             MAC2STR(ap.bssid));
+  }
+  wifi_get_ip_str(diagnostics->ip, sizeof(diagnostics->ip));
 }
 
 void wifi_stop(void) {
