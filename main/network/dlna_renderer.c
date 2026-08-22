@@ -36,7 +36,7 @@
 #define DLNA_SSDP_STACK_SIZE    8192
 #define DLNA_SSDP_PACKET_SIZE   1536
 #define DLNA_SSDP_MESSAGE_SIZE  896
-#define DLNA_SERVER_NAME        "ESP32/5.5 UPnP/1.0 AirPlayDLNA/3.1.0"
+#define DLNA_SERVER_NAME        "ESP32/5.5 UPnP/1.0 AirPlayDLNA/3.2.0"
 
 typedef enum {
   DLNA_STATE_STOPPED,
@@ -163,7 +163,7 @@ static esp_err_t device_xml_handler(httpd_req_t *req) {
       "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
       "<friendlyName>%s</friendlyName><manufacturer>AirPlay and DLNA Receiver</manufacturer>"
       "<modelName>AirPlay 2 and DLNA Receiver</modelName>"
-      "<modelNumber>3.1.0</modelNumber><UDN>%s</UDN>"
+      "<modelNumber>3.2.0</modelNumber><UDN>%s</UDN>"
       "<serviceList><service><serviceType>%s</serviceType>"
       "<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>"
       "<SCPDURL>/dlna/avtransport.xml</SCPDURL>"

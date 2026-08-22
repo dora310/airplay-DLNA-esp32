@@ -23,6 +23,11 @@
 /* Ring buffer size — must be power of two for masking. */
 #define LOG_RING_SIZE 8192
 #define LOG_RING_MASK (LOG_RING_SIZE - 1)
+#define DIAG_RING_SIZE 4096
+#define DIAG_RING_MASK (DIAG_RING_SIZE - 1)
+#define DIAG_FILE "/spiffs/diagnostics.log"
+#define DIAG_FILE_OLD "/spiffs/diagnostics.old.log"
+#define DIAG_FILE_MAX 12288
 
 #define MAX_WS_CLIENTS        3
 #define BROADCAST_TASK_STACK  4096
@@ -33,6 +38,10 @@ static char *s_ring;
 static volatile size_t s_head; /* next write position  */
 static volatile size_t s_tail; /* next read position   */
 static SemaphoreHandle_t s_mutex;
+static char *s_diag_ring;
+static volatile size_t s_diag_head;
+static volatile size_t s_diag_tail;
+static volatile uint32_t s_diag_dropped;
 
 static httpd_handle_t s_server;
 static int s_clients[MAX_WS_CLIENTS];
@@ -60,6 +69,36 @@ static void ring_write(const char *data, size_t len) {
   }
 }
 
+static void diag_ring_write(const char *data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    size_t next = (s_diag_head + 1) & DIAG_RING_MASK;
+    if (next == (s_diag_tail & DIAG_RING_MASK)) {
+      s_diag_dropped++;
+      break;
+    }
+    s_diag_ring[s_diag_head & DIAG_RING_MASK] = data[i];
+    s_diag_head = next;
+  }
+}
+
+static size_t diag_ring_read(char *buf, size_t max) {
+  size_t used = (s_diag_head - s_diag_tail) & DIAG_RING_MASK;
+  if (used > max) used = max;
+  for (size_t i = 0; i < used; i++) {
+    buf[i] = s_diag_ring[s_diag_tail & DIAG_RING_MASK];
+    s_diag_tail = (s_diag_tail + 1) & DIAG_RING_MASK;
+  }
+  return used;
+}
+
+static bool is_diagnostic_line(const char *line) {
+  if (!line) return false;
+  while (*line == '\r' || *line == '\n' || *line == ' ') line++;
+  return ((line[0] == 'E' || line[0] == 'W') &&
+          (line[1] == ' ' || line[1] == '(')) ||
+         strstr(line, "E (") != NULL || strstr(line, "W (") != NULL;
+}
+
 static size_t ring_read(char *buf, size_t max) {
   size_t avail = ring_used();
   if (avail > max) {
@@ -77,15 +116,18 @@ static size_t ring_read(char *buf, size_t max) {
 /* ------------------------------------------------------------------ */
 
 static int log_vprintf_hook(const char *fmt, va_list args) {
-  /* Always print to UART first. */
-  int ret = s_orig_vprintf(fmt, args);
+  /* A va_list is consumed by vprintf, so make independent copies for UART
+     and capture. This also fixes truncated browser/persistent log lines. */
+  va_list uart_args;
+  va_list format_args;
+  va_copy(uart_args, args);
+  va_copy(format_args, args);
+  int ret = s_orig_vprintf(fmt, uart_args);
+  va_end(uart_args);
 
-  /* Format into a stack buffer and push to ring. */
   char buf[256];
-  va_list copy;
-  va_copy(copy, args);
-  int len = vsnprintf(buf, sizeof(buf), fmt, copy);
-  va_end(copy);
+  int len = vsnprintf(buf, sizeof(buf), fmt, format_args);
+  va_end(format_args);
 
   if (len > 0) {
     if ((size_t)len >= sizeof(buf)) {
@@ -93,12 +135,48 @@ static int log_vprintf_hook(const char *fmt, va_list args) {
     }
     if (xSemaphoreTake(s_mutex, 0) == pdTRUE) {
       ring_write(buf, (size_t)len);
+      if (is_diagnostic_line(buf)) {
+        diag_ring_write(buf, (size_t)len);
+        if (buf[len - 1] != '\n') diag_ring_write("\n", 1);
+      }
       xSemaphoreGive(s_mutex);
     }
     /* If the mutex is held we silently drop — better than blocking a log call.
      */
   }
   return ret;
+}
+
+static void persistent_log_task(void *arg) {
+  (void)arg;
+  char chunk[1024];
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    size_t len = 0;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      len = diag_ring_read(chunk, sizeof(chunk));
+      xSemaphoreGive(s_mutex);
+    }
+    if (!len) continue;
+
+    FILE *existing = fopen(DIAG_FILE, "rb");
+    long size = 0;
+    if (existing) {
+      if (fseek(existing, 0, SEEK_END) == 0) size = ftell(existing);
+      fclose(existing);
+    }
+    if (size >= DIAG_FILE_MAX) {
+      remove(DIAG_FILE_OLD);
+      rename(DIAG_FILE, DIAG_FILE_OLD);
+    }
+    FILE *file = fopen(DIAG_FILE, "ab");
+    if (file) {
+      fwrite(chunk, 1, len, file);
+      fclose(file);
+    } else {
+      s_diag_dropped += (uint32_t)len;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -204,8 +282,12 @@ esp_err_t log_stream_init(void) {
   if (!s_ring) {
     return ESP_ERR_NO_MEM;
   }
+  s_diag_ring = heap_caps_malloc(DIAG_RING_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_diag_ring) s_diag_ring = malloc(DIAG_RING_SIZE);
+  if (!s_diag_ring) return ESP_ERR_NO_MEM;
 
   s_head = s_tail = 0;
+  s_diag_head = s_diag_tail = 0;
   s_client_count = 0;
 
   s_client_mutex = xSemaphoreCreateMutex();
@@ -216,8 +298,42 @@ esp_err_t log_stream_init(void) {
   /* Hook into esp_log — keep the original so UART output continues. */
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
 
+  task_create_spiram(persistent_log_task, "diag_log", 3072, NULL, 2,
+                     NULL, NULL);
+
   return ESP_OK;
 }
+
+static size_t read_file_into(const char *path, char *buffer, size_t capacity,
+                             size_t offset) {
+  if (offset >= capacity) return offset;
+  FILE *file = fopen(path, "rb");
+  if (!file) return offset;
+  offset += fread(buffer + offset, 1, capacity - offset - 1, file);
+  fclose(file);
+  buffer[offset] = '\0';
+  return offset;
+}
+
+size_t log_stream_read_persistent(char *buffer, size_t capacity) {
+  if (!buffer || capacity < 2) return 0;
+  buffer[0] = '\0';
+  size_t offset = read_file_into(DIAG_FILE_OLD, buffer, capacity, 0);
+  return read_file_into(DIAG_FILE, buffer, capacity, offset);
+}
+
+esp_err_t log_stream_clear_persistent(void) {
+  remove(DIAG_FILE);
+  remove(DIAG_FILE_OLD);
+  if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    s_diag_head = s_diag_tail = 0;
+    s_diag_dropped = 0;
+    xSemaphoreGive(s_mutex);
+  }
+  return ESP_OK;
+}
+
+uint32_t log_stream_persistent_dropped(void) { return s_diag_dropped; }
 
 esp_err_t log_stream_register(httpd_handle_t server) {
   s_server = server;

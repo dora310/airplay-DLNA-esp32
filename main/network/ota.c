@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include "esp_app_format.h"
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -9,6 +10,26 @@
 #include <sys/param.h>
 
 static const char *TAG = "ota";
+
+static esp_err_t validate_written_partition(const esp_partition_t *partition) {
+  esp_app_desc_t uploaded;
+  const esp_app_desc_t *running = esp_app_get_description();
+  esp_err_t err = esp_ota_get_partition_description(partition, &uploaded);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Cannot read uploaded application descriptor: %s",
+             esp_err_to_name(err));
+    return err;
+  }
+  if (strncmp(uploaded.project_name, running->project_name,
+              sizeof(uploaded.project_name)) != 0) {
+    ESP_LOGE(TAG, "Wrong firmware product '%s' (expected '%s')",
+             uploaded.project_name, running->project_name);
+    return ESP_ERR_INVALID_ARG;
+  }
+  ESP_LOGI(TAG, "Validated application %s version %s",
+           uploaded.project_name, uploaded.version);
+  return ESP_OK;
+}
 
 /**
  * Validate an in-memory firmware image before writing to flash.
@@ -129,6 +150,9 @@ static esp_err_t ota_buffered(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  err = validate_written_partition(ota_partition);
+  if (err != ESP_OK) return err;
+
   if (esp_ota_set_boot_partition(ota_partition) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to set boot partition");
     return ESP_FAIL;
@@ -184,6 +208,10 @@ static esp_err_t ota_streaming(httpd_req_t *req) {
     ESP_LOGE(TAG, "Image validation failed");
     return ESP_FAIL;
   }
+
+
+  err = validate_written_partition(ota_partition);
+  if (err != ESP_OK) return err;
 
   if (esp_ota_set_boot_partition(ota_partition) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to set boot partition");

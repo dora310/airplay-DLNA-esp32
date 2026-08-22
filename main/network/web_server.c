@@ -416,6 +416,13 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
   if (err != ESP_OK) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                         esp_err_to_name(err));
+    /* A rejected upload must not leave the otherwise healthy receiver with
+       AirPlay stopped. */
+    esp_err_t restart_err = rtsp_server_start();
+    if (restart_err != ESP_OK && restart_err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGE(TAG, "Could not restart AirPlay after failed OTA: %s",
+               esp_err_to_name(restart_err));
+    }
     return ESP_FAIL;
   }
 
@@ -802,7 +809,7 @@ esp_err_t web_server_start(uint16_t port) {
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
   config.max_uri_handlers =
-      48; // Captive portal + v3 API + EQ + speedtest + DLNA routes
+      64; // Captive portal + v3.2 maintenance API + EQ + speedtest + DLNA
   config.max_resp_headers = 8;
   config.stack_size = 8192;
   config.uri_match_fn = httpd_uri_match_wildcard;
