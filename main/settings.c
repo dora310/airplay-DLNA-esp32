@@ -21,6 +21,10 @@ static const char *TAG = "settings";
 #define NVS_KEY_LED_BRIGHTNESS "led_bright"
 #define NVS_KEY_WEB_PASSWORD   "web_pw_sha"
 #define NVS_KEY_MAINTENANCE    "maint_v1"
+#define NVS_KEY_SCHEMA         "cfg_schema"
+#define NVS_KEY_MQTT           "mqtt_v1"
+#define NVS_KEY_PENDING_SSID   "wifi_test_s"
+#define NVS_KEY_PENDING_PASS   "wifi_test_p"
 
 #define MAX_WIFI_SSID_LEN     32
 #define MAX_WIFI_PASSWORD_LEN 64
@@ -37,8 +41,52 @@ static bool g_bt_volume_loaded = false;
 
 static float g_eq_gains[SETTINGS_EQ_BANDS];
 static bool g_eq_loaded = false;
+static uint32_t g_schema_version;
+
+static esp_err_t migrate_settings(void) {
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+
+  uint32_t from = 0;
+  err = nvs_get_u32(nvs, NVS_KEY_SCHEMA, &from);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    from = 0;
+    err = ESP_OK;
+  }
+  if (err != ESP_OK) {
+    nvs_close(nvs);
+    return err;
+  }
+  if (from > SETTINGS_SCHEMA_VERSION) {
+    ESP_LOGW(TAG, "Settings schema %lu is newer than firmware schema %u",
+             (unsigned long)from, SETTINGS_SCHEMA_VERSION);
+    g_schema_version = from;
+    nvs_close(nvs);
+    return ESP_OK;
+  }
+
+  if (from < SETTINGS_SCHEMA_VERSION) {
+    /* Migrations are deliberately additive. Existing Wi-Fi, device, EQ,
+       radio, password and maintenance keys remain untouched. New settings
+       use safe defaults when their versioned blob is absent. */
+    ESP_LOGI(TAG, "Migrating settings schema %lu -> %u",
+             (unsigned long)from, SETTINGS_SCHEMA_VERSION);
+    err = nvs_set_u32(nvs, NVS_KEY_SCHEMA, SETTINGS_SCHEMA_VERSION);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+  }
+  nvs_close(nvs);
+  if (err == ESP_OK) g_schema_version = SETTINGS_SCHEMA_VERSION;
+  return err;
+}
 
 esp_err_t settings_init(void) {
+  esp_err_t migration = migrate_settings();
+  if (migration != ESP_OK) {
+    ESP_LOGE(TAG, "Settings migration failed: %s",
+             esp_err_to_name(migration));
+    return migration;
+  }
   // Load volume on init
   nvs_handle_t nvs;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
@@ -64,6 +112,8 @@ esp_err_t settings_init(void) {
 
   return ESP_OK;
 }
+
+uint32_t settings_schema_version(void) { return g_schema_version; }
 
 esp_err_t settings_get_volume(float *volume_db) {
   if (!volume_db) {
@@ -255,6 +305,76 @@ esp_err_t settings_set_wifi_credentials(const char *ssid,
     ESP_LOGE(TAG, "Failed to save WiFi credentials: %s", esp_err_to_name(err));
   }
 
+  return err;
+}
+
+esp_err_t settings_set_pending_wifi_credentials(const char *ssid,
+                                                const char *password) {
+  if (!ssid || !ssid[0] || strlen(ssid) > MAX_WIFI_SSID_LEN || !password ||
+      strlen(password) > MAX_WIFI_PASSWORD_LEN) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  err = nvs_set_str(nvs, NVS_KEY_PENDING_SSID, ssid);
+  if (err == ESP_OK) err = nvs_set_str(nvs, NVS_KEY_PENDING_PASS, password);
+  if (err == ESP_OK) err = nvs_commit(nvs);
+  nvs_close(nvs);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Staged WiFi credentials for transactional test: %s", ssid);
+  }
+  return err;
+}
+
+bool settings_has_pending_wifi_credentials(void) {
+  char ssid[MAX_WIFI_SSID_LEN + 1] = {0};
+  char password[MAX_WIFI_PASSWORD_LEN + 1] = {0};
+  return settings_get_pending_wifi_credentials(
+             ssid, sizeof(ssid), password, sizeof(password)) == ESP_OK &&
+         ssid[0] != '\0';
+}
+
+esp_err_t settings_get_pending_wifi_credentials(char *ssid, size_t ssid_len,
+                                                char *password,
+                                                size_t password_len) {
+  if (!ssid || !ssid_len || !password || !password_len)
+    return ESP_ERR_INVALID_ARG;
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) return ESP_ERR_NOT_FOUND;
+  size_t size = ssid_len;
+  err = nvs_get_str(nvs, NVS_KEY_PENDING_SSID, ssid, &size);
+  if (err == ESP_OK) {
+    size = password_len;
+    err = nvs_get_str(nvs, NVS_KEY_PENDING_PASS, password, &size);
+  }
+  nvs_close(nvs);
+  return err;
+}
+
+esp_err_t settings_clear_pending_wifi_credentials(void) {
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  esp_err_t a = nvs_erase_key(nvs, NVS_KEY_PENDING_SSID);
+  esp_err_t b = nvs_erase_key(nvs, NVS_KEY_PENDING_PASS);
+  if (a != ESP_OK && a != ESP_ERR_NVS_NOT_FOUND) err = a;
+  else if (b != ESP_OK && b != ESP_ERR_NVS_NOT_FOUND) err = b;
+  else err = nvs_commit(nvs);
+  nvs_close(nvs);
+  return err;
+}
+
+esp_err_t settings_promote_pending_wifi_credentials(void) {
+  char ssid[MAX_WIFI_SSID_LEN + 1] = {0};
+  char password[MAX_WIFI_PASSWORD_LEN + 1] = {0};
+  esp_err_t err = settings_get_pending_wifi_credentials(
+      ssid, sizeof(ssid), password, sizeof(password));
+  if (err != ESP_OK) return err;
+  err = settings_set_wifi_credentials(ssid, password);
+  if (err == ESP_OK) err = settings_clear_pending_wifi_credentials();
+  if (err == ESP_OK) ESP_LOGI(TAG, "WiFi credential test passed; settings committed");
   return err;
 }
 
@@ -574,6 +694,67 @@ esp_err_t settings_set_maintenance(const settings_maintenance_t *config) {
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
   if (err != ESP_OK) return err;
   err = nvs_set_blob(nvs, NVS_KEY_MAINTENANCE, &value, sizeof(value));
+  if (err == ESP_OK) err = nvs_commit(nvs);
+  nvs_close(nvs);
+  return err;
+}
+
+static void mqtt_defaults(settings_mqtt_t *config) {
+  memset(config, 0, sizeof(*config));
+  config->home_assistant_discovery = true;
+  strlcpy(config->broker_uri, "mqtt://192.168.1.2",
+          sizeof(config->broker_uri));
+  strlcpy(config->topic_prefix, "airplay-dlna",
+          sizeof(config->topic_prefix));
+#ifdef CONFIG_MQTT_CONTROL_ENABLE
+  config->enabled = true;
+#ifdef CONFIG_MQTT_BROKER_URI
+  strlcpy(config->broker_uri, CONFIG_MQTT_BROKER_URI,
+          sizeof(config->broker_uri));
+#endif
+#ifdef CONFIG_MQTT_TOPIC_PREFIX
+  strlcpy(config->topic_prefix, CONFIG_MQTT_TOPIC_PREFIX,
+          sizeof(config->topic_prefix));
+#endif
+#endif
+}
+
+static bool mqtt_valid(const settings_mqtt_t *config) {
+  if (!config) return false;
+  if (config->enabled &&
+      (strncmp(config->broker_uri, "mqtt://", 7) != 0 &&
+       strncmp(config->broker_uri, "mqtts://", 8) != 0)) return false;
+  return config->topic_prefix[0] != '\0' &&
+         strlen(config->topic_prefix) < SETTINGS_MQTT_TOPIC_LEN;
+}
+
+esp_err_t settings_get_mqtt(settings_mqtt_t *config) {
+  if (!config) return ESP_ERR_INVALID_ARG;
+  mqtt_defaults(config);
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) return ESP_OK;
+  settings_mqtt_t saved;
+  size_t size = sizeof(saved);
+  err = nvs_get_blob(nvs, NVS_KEY_MQTT, &saved, &size);
+  nvs_close(nvs);
+  if (err == ESP_OK && size == sizeof(saved) && mqtt_valid(&saved)) {
+    *config = saved;
+  }
+  return ESP_OK;
+}
+
+esp_err_t settings_set_mqtt(const settings_mqtt_t *config) {
+  if (!mqtt_valid(config)) return ESP_ERR_INVALID_ARG;
+  settings_mqtt_t value = *config;
+  value.broker_uri[sizeof(value.broker_uri) - 1] = '\0';
+  value.username[sizeof(value.username) - 1] = '\0';
+  value.password[sizeof(value.password) - 1] = '\0';
+  value.topic_prefix[sizeof(value.topic_prefix) - 1] = '\0';
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) return err;
+  err = nvs_set_blob(nvs, NVS_KEY_MQTT, &value, sizeof(value));
   if (err == ESP_OK) err = nvs_commit(nvs);
   nvs_close(nvs);
   return err;

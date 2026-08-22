@@ -46,11 +46,14 @@ set( SRC_FILES
     "source_manager.c"
     "system_monitor.c"
     "maintenance.c"
+    "recovery.c"
     "optional_backends.c"
     "dacp_client.c"
     "audio/software_dsp.c"
+    "audio/audio_test.c"
     "network/web_api_v3.c"
     "network/mqtt_control.c"
+    "network/github_ota.c"
 )
 
 # Select audio output implementation at compile time
@@ -92,6 +95,7 @@ set( DEPS
     esp_timer
     esp_http_server
     esp_http_client
+    esp_https_ota
     app_update
     json
     mbedtls

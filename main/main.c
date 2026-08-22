@@ -25,6 +25,8 @@
 #include "optional_backends.h"
 #include "software_dsp.h"
 #include "maintenance.h"
+#include "recovery.h"
+#include "audio_test.h"
 
 #ifdef CONFIG_BT_A2DP_ENABLE
 #include "a2dp_sink.h"
@@ -66,6 +68,10 @@ static void on_airplay_dlna_event(rtsp_event_t event,
 }
 
 static void start_airplay_services(void) {
+  if (recovery_is_safe_mode()) {
+    ESP_LOGW(TAG, "Safe mode: AirPlay/DLNA audio services remain disabled");
+    return;
+  }
   if (s_airplay_started) {
     return;
   }
@@ -84,6 +90,7 @@ static void start_airplay_services(void) {
     ESP_ERROR_CHECK(hap_init());
     ESP_ERROR_CHECK(audio_receiver_init());
     ESP_ERROR_CHECK(audio_output_init());
+    audio_test_set_output_ready(true);
     mdns_airplay_init();
     s_airplay_infrastructure_ready = true;
   }
@@ -225,6 +232,7 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
+  ESP_ERROR_CHECK(recovery_init());
   spiffs_storage_init();
   log_stream_init();
   ESP_ERROR_CHECK(playback_control_init());
@@ -317,22 +325,25 @@ void app_main(void) {
   // Start services that work on any interface
   ESP_ERROR_CHECK(web_server_start(80));
   maintenance_mark_services_ready();
-  esp_err_t dlna_err =
-      dlna_renderer_register(web_server_get_handle(), 80);
-  if (dlna_err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
+  recovery_mark_services_ready();
+  if (!recovery_is_safe_mode()) {
+    esp_err_t dlna_err =
+        dlna_renderer_register(web_server_get_handle(), 80);
+    if (dlna_err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
+    }
+    if (mqtt_control_start() != ESP_OK) {
+      ESP_LOGW(TAG, "MQTT integration did not start");
+    }
+    rtsp_events_register(on_airplay_dlna_event, NULL);
+  } else {
+    ESP_LOGW(TAG, "Recovery web panel is available; audio services skipped");
   }
-#ifdef CONFIG_MQTT_CONTROL_ENABLE
-  if (mqtt_control_start() != ESP_OK) {
-    ESP_LOGW(TAG, "MQTT integration did not start");
-  }
-#endif
-  rtsp_events_register(on_airplay_dlna_event, NULL);
   task_create_spiram(network_monitor_task, "net_mon", 4096, NULL, 5, NULL,
                      NULL);
 
   bool connected = eth_available || wifi_is_connected();
-  if (connected) {
+  if (connected && !recovery_is_safe_mode()) {
     start_airplay_services();
     err = optional_backends_init();
     if (err != ESP_OK) {

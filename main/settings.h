@@ -12,11 +12,15 @@
 
 // Fixed product name displayed in the System information panel.
 #define SETTINGS_SYSTEM_DEVICE_NAME "AirPlay and DLNA Receiver"
+#define SETTINGS_SCHEMA_VERSION 4
 
 /**
  * Initialize settings module (call once at startup)
  */
 esp_err_t settings_init(void);
+
+/** Version of the NVS layout after automatic migration. */
+uint32_t settings_schema_version(void);
 
 /**
  * Get saved volume in dB
@@ -81,6 +85,16 @@ esp_err_t settings_get_wifi_password(char *password, size_t len);
  * @param password WiFi password
  */
 esp_err_t settings_set_wifi_credentials(const char *ssid, const char *password);
+
+/** Stage credentials for a transactional connection test on the next boot. */
+esp_err_t settings_set_pending_wifi_credentials(const char *ssid,
+                                                const char *password);
+bool settings_has_pending_wifi_credentials(void);
+esp_err_t settings_get_pending_wifi_credentials(char *ssid, size_t ssid_len,
+                                                char *password,
+                                                size_t password_len);
+esp_err_t settings_promote_pending_wifi_credentials(void);
+esp_err_t settings_clear_pending_wifi_credentials(void);
 
 /**
  * Check if WiFi credentials are stored
@@ -151,7 +165,7 @@ bool settings_verify_web_password(const char *password);
 esp_err_t settings_get_web_password_digest(uint8_t digest[32]);
 esp_err_t settings_set_web_password_digest(const uint8_t digest[32]);
 
-// ---- v3.2 maintenance and user-interface preferences ----
+// ---- Maintenance and user-interface preferences ----
 
 typedef enum {
   SETTINGS_THEME_AUTO = 0,
@@ -169,6 +183,25 @@ typedef struct {
 
 esp_err_t settings_get_maintenance(settings_maintenance_t *config);
 esp_err_t settings_set_maintenance(const settings_maintenance_t *config);
+
+// ---- MQTT / Home Assistant ----
+
+#define SETTINGS_MQTT_URI_LEN 128
+#define SETTINGS_MQTT_USER_LEN 64
+#define SETTINGS_MQTT_PASSWORD_LEN 96
+#define SETTINGS_MQTT_TOPIC_LEN 96
+
+typedef struct {
+  bool enabled;
+  bool home_assistant_discovery;
+  char broker_uri[SETTINGS_MQTT_URI_LEN];
+  char username[SETTINGS_MQTT_USER_LEN];
+  char password[SETTINGS_MQTT_PASSWORD_LEN];
+  char topic_prefix[SETTINGS_MQTT_TOPIC_LEN];
+} settings_mqtt_t;
+
+esp_err_t settings_get_mqtt(settings_mqtt_t *config);
+esp_err_t settings_set_mqtt(const settings_mqtt_t *config);
 
 /** Erase all receiver settings, including Wi-Fi and the access password. */
 esp_err_t settings_factory_reset(void);
