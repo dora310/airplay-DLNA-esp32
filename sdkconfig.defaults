@@ -37,6 +37,8 @@ CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
 # mbedTLS: use default allocator so RSA MPI buffers can spill to SPIRAM
 # when internal DRAM is tight (audio task stacks pre-allocated there).
 CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
 # LWIP - increase socket limits for AirPlay
 CONFIG_LWIP_MAX_SOCKETS=16
