@@ -9,10 +9,21 @@ permissions:
 jobs:
   build-esp32s3:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+
+      - name: Read firmware version
+        id: firmware_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < version.txt)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version.txt must contain MAJOR.MINOR.PATCH, got '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Restore required ESP-IDF components
         shell: bash
@@ -35,26 +46,41 @@ jobs:
         with:
           esp_idf_version: v5.5
           target: esp32s3
-          command: >
-            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build &&
-            cp build/airplay2-receiver.bin airplay2-receiver-esp32s3-v0.3.00-ota.bin &&
-            cd build &&
-            esptool.py --chip esp32s3 merge_bin --format raw
-            -o ../airplay2-receiver-esp32s3-v0.3.00-install.bin
-            $(cat flash_args) &&
-            cd .. &&
-            sha256sum
-            airplay2-receiver-esp32s3-v0.3.00-install.bin
-            airplay2-receiver-esp32s3-v0.3.00-ota.bin
-            > SHA256SUMS-v0.3.00.txt
+          command: bash .github/scripts/build-esp32s3.sh
+
+      - name: Verify generated BIN files
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.firmware_version.outputs.version }}"
+          install_file="airplay2-receiver-esp32s3-v${version}-install.bin"
+          ota_file="airplay2-receiver-esp32s3-v${version}-ota.bin"
+          checksum_file="SHA256SUMS-v${version}.txt"
+
+          test -s "$install_file" || {
+            echo "::error::Missing or empty installation BIN: $install_file"
+            exit 1
+          }
+          test -s "$ota_file" || {
+            echo "::error::Missing or empty OTA BIN: $ota_file"
+            exit 1
+          }
+          test -s "$checksum_file" || {
+            echo "::error::Missing or empty checksum file: $checksum_file"
+            exit 1
+          }
+
+          ls -lh "$install_file" "$ota_file" "$checksum_file"
 
       - name: Upload installation files
         uses: actions/upload-artifact@v6
         with:
-          name: airplay-esp32s3-v0.3.00-bin-files
+          name: airplay-esp32s3-v${{ steps.firmware_version.outputs.version }}-bin-files
           path: |
-            airplay2-receiver-esp32s3-v0.3.00-install.bin
-            airplay2-receiver-esp32s3-v0.3.00-ota.bin
-            SHA256SUMS-v0.3.00.txt
+            airplay2-receiver-esp32s3-v${{ steps.firmware_version.outputs.version }}-install.bin
+            airplay2-receiver-esp32s3-v${{ steps.firmware_version.outputs.version }}-ota.bin
+            SHA256SUMS-v${{ steps.firmware_version.outputs.version }}.txt
+            build/flash_args
+            build/flasher_args.json
           if-no-files-found: error
           retention-days: 30

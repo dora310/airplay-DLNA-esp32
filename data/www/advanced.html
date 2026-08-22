@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AirPlay and DLNA Receiver Advanced</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #15182b;
+      --panel: #24283f;
+      --field: #111426;
+      --text: #f4f5ff;
+      --muted: #aeb2c6;
+      --accent: #ef476f;
+      --link: #7ad7ff;
+      --good: #b7efcf;
+      --error: #ff9aa9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font: 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--background);
+      color: var(--text);
+      max-width: 850px;
+      margin: auto;
+      padding: 24px;
+    }
+    section {
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 20px;
+      margin: 16px 0;
+    }
+    button, input, select {
+      font: inherit;
+      padding: 10px;
+      margin: 5px;
+      border: 0;
+      border-radius: 8px;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled { cursor: wait; opacity: 0.65; }
+    input, select {
+      background: var(--field);
+      color: white;
+      min-width: 240px;
+    }
+    input[type="checkbox"] { min-width: auto; }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--good);
+      min-height: 1.5em;
+    }
+    pre.error { color: var(--error); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    label { display: block; margin: 8px 0; }
+    .muted { color: var(--muted); }
+    .message { min-height: 1.5em; color: var(--good); }
+    .preset-list { display: grid; gap: 8px; margin-top: 12px; }
+    .preset-item {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; padding: 10px; background: var(--field); border-radius: 8px;
+    }
+    .preset-item button { margin: 0; }
+    .secondary { background: #454b67; }
+    a { color: var(--link); }
+  </style>
+</head>
+<body>
+  <h1>AirPlay and DLNA Receiver <small id="pageVersion"></small></h1>
+  <p><a href="/">&larr; Basic settings</a></p>
+
+  <section>
+    <h2>API access</h2>
+    <label>
+      Current API password
+      <input id="apiKey" type="password" autocomplete="current-password"
+             placeholder="Required only when protection is enabled">
+    </label>
+    <button id="saveApiKeyButton" type="button">Remember API password</button>
+    <label>
+      New API password
+      <input id="newPassword" type="password" autocomplete="new-password"
+             placeholder="Enter 8-64 characters">
+    </label>
+    <button id="setPasswordButton" type="button">Set/change password</button>
+    <p class="muted">
+      The current password authorizes protected requests. The new password must
+      contain 8-64 characters. Enter an empty new password to disable protection.
+    </p>
+    <p id="securityMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Playback</h2>
+    <div class="row">
+      <button type="button" data-control="play_pause">Play/Pause</button>
+      <button type="button" data-control="previous">Previous</button>
+      <button type="button" data-control="next">Next</button>
+      <button type="button" data-control="volume_down">Volume &minus;</button>
+      <button type="button" data-control="volume_up">Volume +</button>
+      <button type="button" data-control="mute">Mute</button>
+    </div>
+    <p id="playbackMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Internet radio</h2>
+    <input id="radioUrl" type="url" inputmode="url"
+           placeholder="https://station/stream.mp3">
+    <button id="radioButton" type="button">Play URL</button>
+    <h3>Favourite stations</h3>
+    <div class="row">
+      <select id="presetSlot" aria-label="Preset slot">
+        <option value="0">Preset 1</option><option value="1">Preset 2</option>
+        <option value="2">Preset 3</option><option value="3">Preset 4</option>
+        <option value="4">Preset 5</option><option value="5">Preset 6</option>
+        <option value="6">Preset 7</option><option value="7">Preset 8</option>
+      </select>
+      <input id="presetName" maxlength="31" placeholder="Station name">
+      <button id="savePresetButton" type="button">Save favourite</button>
+      <button id="clearPresetButton" class="secondary" type="button">Clear slot</button>
+    </div>
+    <div id="presetList" class="preset-list"></div>
+    <p id="radioMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Sleep timer</h2>
+    <div class="row">
+      <select id="sleepMinutes">
+        <option value="15">15 minutes</option>
+        <option value="30">30 minutes</option>
+        <option value="45">45 minutes</option>
+        <option value="60">1 hour</option>
+        <option value="90">1.5 hours</option>
+        <option value="120">2 hours</option>
+      </select>
+      <button id="startSleepButton" type="button">Start timer</button>
+      <button id="cancelSleepButton" class="secondary" type="button">Cancel timer</button>
+    </div>
+    <p class="muted">When the timer expires, the active audio source is muted.</p>
+    <p id="sleepMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>DSP</h2>
+    <div class="row">
+      <button type="button" class="secondary" data-dsp-preset="flat">DSP off</button>
+      <button type="button" class="secondary" data-dsp-preset="night">Night mode</button>
+      <button type="button" class="secondary" data-dsp-preset="mono">Mono</button>
+      <button type="button" class="secondary" data-dsp-preset="speech">Speech</button>
+    </div>
+    <label><input id="dspOn" type="checkbox"> Enable DSP</label>
+    <label><input id="limiter" type="checkbox" checked> Limiter</label>
+    <label><input id="normalization" type="checkbox"> Normalization</label>
+    <label>
+      Balance -1 to +1
+      <input id="balance" type="number" min="-1" max="1" step="0.05" value="0">
+    </label>
+    <label>
+      Channel
+      <select id="channel">
+        <option value="0">Stereo</option>
+        <option value="1">Mono</option>
+        <option value="2">Left</option>
+        <option value="3">Right</option>
+        <option value="4">Swap</option>
+      </select>
+    </label>
+    <label>
+      Crossover
+      <select id="cross">
+        <option value="0">Off</option>
+        <option value="1">High-pass</option>
+        <option value="2">Low-pass</option>
+      </select>
+      <input id="crossHz" type="number" value="80" min="30" max="18000"> Hz
+    </label>
+    <button id="saveDspButton" type="button">Apply DSP</button>
+    <p id="dspMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Status and diagnostics</h2>
+    <button id="refreshButton" type="button">Refresh</button>
+    <button id="downloadDiagnosticsButton" class="secondary" type="button">Download JSON</button>
+    <pre id="diagnosticStatus" aria-live="polite">Loading...</pre>
+  </section>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const elements = {
+        apiKey: document.getElementById('apiKey'),
+        newPassword: document.getElementById('newPassword'),
+        pageVersion: document.getElementById('pageVersion'),
+        securityMessage: document.getElementById('securityMessage'),
+        playbackMessage: document.getElementById('playbackMessage'),
+        radioUrl: document.getElementById('radioUrl'),
+        radioMessage: document.getElementById('radioMessage'),
+        presetSlot: document.getElementById('presetSlot'),
+        presetName: document.getElementById('presetName'),
+        presetList: document.getElementById('presetList'),
+        sleepMinutes: document.getElementById('sleepMinutes'),
+        sleepMessage: document.getElementById('sleepMessage'),
+        dspOn: document.getElementById('dspOn'),
+        limiter: document.getElementById('limiter'),
+        normalization: document.getElementById('normalization'),
+        balance: document.getElementById('balance'),
+        channel: document.getElementById('channel'),
+        cross: document.getElementById('cross'),
+        crossHz: document.getElementById('crossHz'),
+        dspMessage: document.getElementById('dspMessage'),
+        refreshButton: document.getElementById('refreshButton'),
+        diagnosticStatus: document.getElementById('diagnosticStatus')
+      };
+
+      elements.apiKey.value = localStorage.getItem('apiKey') || '';
+      function requestHeaders() {
+        const headers = { Accept: 'application/json' };
+        const key = elements.apiKey.value ||
+                    localStorage.getItem('apiKey') || '';
+        if (key) headers['X-API-Key'] = key;
+        return headers;
+      }
+
+      async function api(url, options = {}) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        try {
+          const response = await fetch(url, {
+            ...options,
+            cache: 'no-store',
+            signal: controller.signal,
+            headers: {
+              ...requestHeaders(),
+              ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+              ...(options.headers || {})
+            }
+          });
+          const text = await response.text();
+          let data;
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch (error) {
+            data = {
+              success: false,
+              error: text || 'The device returned invalid JSON.'
+            };
+          }
+          data.http_status = response.status;
+          data.http_ok = response.ok;
+          return data;
+        } catch (error) {
+          return {
+            success: false,
+            error: error.name === 'AbortError'
+              ? 'Request timed out after 8 seconds.'
+              : `Network request failed: ${error.message}`,
+            http_status: 0,
+            http_ok: false
+          };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      function resultMessage(result, successText) {
+        if (result && result.success && result.http_ok !== false) {
+          return successText;
+        }
+        return (result && result.error) ||
+          `Request failed with HTTP status ${result ? result.http_status : 'unknown'}.`;
+      }
+
+      function applyDspValues(dsp) {
+        if (!dsp || !dsp.success) return;
+        elements.dspOn.checked = Boolean(dsp.enabled);
+        elements.limiter.checked = Boolean(dsp.limiter);
+        elements.normalization.checked = Boolean(dsp.normalization);
+        elements.balance.value = dsp.balance ?? 0;
+        elements.channel.value = dsp.channel ?? 0;
+        elements.cross.value = dsp.crossover ?? 0;
+        elements.crossHz.value = dsp.crossover_hz ?? 80;
+      }
+
+      async function refreshDiagnostics() {
+        elements.refreshButton.disabled = true;
+        elements.refreshButton.textContent = 'Refreshing...';
+        elements.diagnosticStatus.classList.remove('error');
+        elements.diagnosticStatus.textContent = 'Loading...';
+        try {
+          const [statusResult, healthResult, dspResult] = await Promise.all([
+            api('/api/v1/status'),
+            api('/api/v1/health'),
+            api('/api/v1/dsp')
+          ]);
+
+          if (statusResult.version) {
+            elements.pageVersion.textContent = `v${statusResult.version}`;
+          }
+          applyDspValues(dspResult);
+
+          const failed = [statusResult, healthResult, dspResult]
+            .some(result =>
+              result.http_ok === false || result.success === false);
+          elements.diagnosticStatus.classList.toggle('error', failed);
+          elements.diagnosticStatus.textContent = JSON.stringify({
+            refreshed_at: new Date().toLocaleString(),
+            status: statusResult,
+            health: healthResult,
+            dsp: dspResult
+          }, null, 2);
+        } catch (error) {
+          elements.diagnosticStatus.classList.add('error');
+          elements.diagnosticStatus.textContent =
+            `Unexpected page error: ${error.message}`;
+        } finally {
+          elements.refreshButton.disabled = false;
+          elements.refreshButton.textContent = 'Refresh';
+        }
+      }
+
+      async function sendControl(action) {
+        elements.playbackMessage.textContent = `Sending ${action}...`;
+        const result = await api('/api/v1/control', {
+          method: 'POST',
+          body: JSON.stringify({ action })
+        });
+        elements.playbackMessage.textContent =
+          resultMessage(result, 'Command sent.');
+        await refreshDiagnostics();
+      }
+
+      async function playRadio() {
+        const url = elements.radioUrl.value.trim();
+        if (!url) {
+          elements.radioMessage.textContent = 'Enter a stream URL first.';
+          return;
+        }
+        elements.radioMessage.textContent = 'Starting stream...';
+        const result = await api('/api/v1/radio', {
+          method: 'POST',
+          body: JSON.stringify({ url })
+        });
+        elements.radioMessage.textContent =
+          resultMessage(result, 'Internet radio started.');
+      }
+
+      async function loadPresets() {
+        const result = await api('/api/v1/radio/presets');
+        elements.presetList.replaceChildren();
+        if (!result.success || !Array.isArray(result.presets)) {
+          elements.radioMessage.textContent = resultMessage(result, '');
+          return;
+        }
+        result.presets.forEach(preset => {
+          if (!preset.url) return;
+          const row = document.createElement('div');
+          row.className = 'preset-item';
+          const label = document.createElement('span');
+          label.textContent = `${preset.slot + 1}. ${preset.name}`;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = 'Play';
+          button.addEventListener('click', async () => {
+            elements.presetSlot.value = String(preset.slot);
+            elements.presetName.value = preset.name;
+            elements.radioUrl.value = preset.url;
+            await playRadio();
+          });
+          row.append(label, button);
+          elements.presetList.append(row);
+        });
+        if (!elements.presetList.childElementCount) {
+          const empty = document.createElement('p');
+          empty.className = 'muted';
+          empty.textContent = 'No favourite stations saved yet.';
+          elements.presetList.append(empty);
+        }
+      }
+
+      async function savePreset(clear = false) {
+        const body = {
+          slot: Number(elements.presetSlot.value),
+          name: clear ? '' : elements.presetName.value.trim(),
+          url: clear ? '' : elements.radioUrl.value.trim()
+        };
+        if (!clear && (!body.name || !body.url)) {
+          elements.radioMessage.textContent =
+            'Enter both a station name and stream URL.';
+          return;
+        }
+        const result = await api('/api/v1/radio/presets', {
+          method: 'POST', body: JSON.stringify(body)
+        });
+        elements.radioMessage.textContent = resultMessage(
+          result, clear ? 'Favourite cleared.' : 'Favourite saved.');
+        if (result.success) await loadPresets();
+      }
+
+      function formatSleep(seconds) {
+        if (!seconds) return 'Sleep timer is off.';
+        const minutes = Math.max(1, Math.ceil(seconds / 60));
+        return `Sleep timer active: approximately ${minutes} minute(s) remaining.`;
+      }
+
+      async function setSleepTimer(minutes) {
+        elements.sleepMessage.textContent = 'Updating sleep timer...';
+        const result = await api('/api/v1/sleep', {
+          method: 'POST', body: JSON.stringify({ minutes })
+        });
+        elements.sleepMessage.textContent = result.success
+          ? formatSleep(result.remaining_seconds)
+          : resultMessage(result, '');
+      }
+
+      async function refreshSleepTimer() {
+        const result = await api('/api/v1/sleep');
+        elements.sleepMessage.textContent = result.success
+          ? formatSleep(result.remaining_seconds)
+          : resultMessage(result, '');
+      }
+
+      function applyQuickDspPreset(name) {
+        elements.dspOn.checked = name !== 'flat';
+        elements.limiter.checked = true;
+        elements.normalization.checked = name === 'night';
+        elements.balance.value = 0;
+        elements.channel.value = name === 'mono' ? 1 : 0;
+        elements.cross.value = name === 'speech' ? 1 : 0;
+        elements.crossHz.value = name === 'speech' ? 100 : 80;
+        elements.dspMessage.textContent =
+          'Preset selected. Press Apply DSP to activate it.';
+      }
+
+      function downloadDiagnostics() {
+        const text = elements.diagnosticStatus.textContent;
+        const blob = new Blob([text], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `airplay-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      async function setPassword() {
+        const newPassword = elements.newPassword.value;
+        elements.securityMessage.textContent = 'Updating password...';
+        const result = await api('/api/v1/security/password', {
+          method: 'POST',
+          body: JSON.stringify({ password: newPassword })
+        });
+        if (result.success && result.http_ok !== false) {
+          localStorage.setItem('apiKey', newPassword);
+          elements.apiKey.value = newPassword;
+          elements.newPassword.value = '';
+        }
+        elements.securityMessage.textContent =
+          resultMessage(result, 'API password updated.');
+        await refreshDiagnostics();
+      }
+
+      async function saveDsp() {
+        elements.dspMessage.textContent = 'Applying DSP settings...';
+        const current = await api('/api/v1/dsp');
+        if (!current.success) {
+          elements.dspMessage.textContent = resultMessage(current, '');
+          return;
+        }
+
+        const body = {
+          ...current,
+          enabled: elements.dspOn.checked,
+          limiter: elements.limiter.checked,
+          normalization: elements.normalization.checked,
+          balance: Number(elements.balance.value),
+          channel: Number(elements.channel.value),
+          crossover: Number(elements.cross.value),
+          crossover_hz: Number(elements.crossHz.value)
+        };
+        delete body.success;
+        delete body.http_status;
+        delete body.http_ok;
+
+        const result = await api('/api/v1/dsp', {
+          method: 'POST',
+          body: JSON.stringify(body)
+        });
+        elements.dspMessage.textContent =
+          resultMessage(result, 'DSP settings applied.');
+        applyDspValues(result);
+        await refreshDiagnostics();
+      }
+
+      document.getElementById('saveApiKeyButton')
+        .addEventListener('click', () => {
+          localStorage.setItem('apiKey', elements.apiKey.value);
+          elements.securityMessage.textContent =
+            'API password remembered in this browser.';
+          refreshDiagnostics();
+        });
+      document.getElementById('setPasswordButton')
+        .addEventListener('click', setPassword);
+      document.getElementById('radioButton')
+        .addEventListener('click', playRadio);
+      document.getElementById('savePresetButton')
+        .addEventListener('click', () => savePreset(false));
+      document.getElementById('clearPresetButton')
+        .addEventListener('click', () => savePreset(true));
+      document.getElementById('startSleepButton')
+        .addEventListener('click', () =>
+          setSleepTimer(Number(elements.sleepMinutes.value)));
+      document.getElementById('cancelSleepButton')
+        .addEventListener('click', () => setSleepTimer(0));
+      document.getElementById('downloadDiagnosticsButton')
+        .addEventListener('click', downloadDiagnostics);
+      document.getElementById('saveDspButton')
+        .addEventListener('click', saveDsp);
+      document.querySelectorAll('[data-dsp-preset]').forEach(button => {
+        button.addEventListener('click', () =>
+          applyQuickDspPreset(button.dataset.dspPreset));
+      });
+      elements.refreshButton.addEventListener('click', refreshDiagnostics);
+      document.querySelectorAll('[data-control]').forEach(button => {
+        button.addEventListener('click',
+          () => sendControl(button.dataset.control));
+      });
+
+      loadPresets();
+      refreshSleepTimer();
+      refreshDiagnostics();
+    })();
+  </script>
+</body>
+</html>

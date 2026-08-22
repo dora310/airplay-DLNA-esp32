@@ -225,7 +225,7 @@ pio run -e myboard -t upload
 
 1. **Power up** the ESP32 via USB-C
 2. On your phone or laptop, connect to the WiFi network **`ESP32-AirPlay-Setup`**
-3. A captive portal will open. (IP: 192.168.4.1)
+3. A captive portal will open. (IP: 192.168.240.1)
 4. Set a name for your speaker (e.g. "Kitchen Speaker")
 5. Select your home WiFi network and set a password
 6. The device restarts and connects to your WiFi

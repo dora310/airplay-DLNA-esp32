@@ -1,4 +1,4 @@
-# ESP32-S3 AirPlay 2 + DLNA v0.3.00 development source
+# ESP32-S3 AirPlay 2 + DLNA v3.1.0 development source
 
 This branch keeps the working v0.2.00 AirPlay protocol, HAP, RTSP, PTP and
 audio-receiver code intact. New services sit behind a central audio-source
@@ -16,6 +16,10 @@ owner so AirPlay always has the highest priority.
 - Wi-Fi retry/backoff, setup-AP recovery, stale-BSSID release for mesh roaming,
   serialized scans, and configurable setup-AP channel.
 - Internet-radio URL playback through the existing MP3/FLAC/WAV DLNA decoder.
+- Eight named Internet-radio favourites stored in NVS and playable from the
+  advanced web page.
+- A 15-minute to 2-hour sleep timer that safely mutes the active source, plus
+  quick DSP profiles and downloadable JSON diagnostics.
 - Shared software DSP for AirPlay and DLNA on the I2S build:
   five parametric peak filters, limiter, slow normalization, balance,
   stereo/mono/left/right/swap and high-pass/low-pass crossover. Settings are
@@ -70,6 +74,8 @@ recovery plan; eFuse changes may be irreversible.
 - `POST /api/v1/control` with `{"action":"play_pause"}`
 - `GET|POST /api/v1/dsp`
 - `POST /api/v1/radio` with `{"url":"https://..."}`
+- `GET|POST /api/v1/radio/presets`
+- `GET|POST /api/v1/sleep` with `{"minutes":30}`; use `0` to cancel
 - `POST /api/v1/security/password` with a password of 8–64 characters
 
 When protection is enabled, mutations and detailed health data require the
@@ -92,5 +98,13 @@ mapping. A clean build should regenerate the managed components from
 This archive is a development source handoff. It has static consistency checks
 but was not compiled or tested on hardware in the current environment because
 the ESP-IDF Xtensa toolchain is not installed. Do not flash a binary labeled
-v0.3.00 unless it was produced from this source and tested first on a recovery-
+v3.1.0 unless it was produced from this source and tested first on a recovery-
 capable board.
+
+## One-click GitHub build
+
+After pushing this folder to the default branch of a GitHub repository, open
+**Actions**, select **Build ESP32-S3 installation BIN**, choose **Run workflow**,
+and download the `airplay-esp32s3-v3.1.0-bin-files` artifact. It contains the
+merged installation image for address `0x0`, the application-only OTA image,
+and SHA-256 checksums.
