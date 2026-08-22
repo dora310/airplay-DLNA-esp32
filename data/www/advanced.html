@@ -69,6 +69,14 @@
     }
     .preset-item button { margin: 0; }
     .secondary { background: #454b67; }
+    .eq-grid { display: grid; gap: 12px; margin: 14px 0; }
+    .eq-band {
+      display: grid; grid-template-columns: 78px 1fr 62px;
+      align-items: center; gap: 10px;
+    }
+    .eq-band input { min-width: 0; width: 100%; margin: 0; accent-color: var(--accent); }
+    .eq-value { text-align: right; color: var(--good); font-variant-numeric: tabular-nums; }
+    .playback-icon { font-size: 1.1em; margin-right: 5px; }
     a { color: var(--link); }
   </style>
 </head>
@@ -100,12 +108,12 @@
   <section>
     <h2>Playback</h2>
     <div class="row">
-      <button type="button" data-control="play_pause">Play/Pause</button>
-      <button type="button" data-control="previous">Previous</button>
-      <button type="button" data-control="next">Next</button>
-      <button type="button" data-control="volume_down">Volume &minus;</button>
-      <button type="button" data-control="volume_up">Volume +</button>
-      <button type="button" data-control="mute">Mute</button>
+      <button type="button" data-control="play_pause"><span class="playback-icon">⏯</span>Play/Pause</button>
+      <button type="button" data-control="previous"><span class="playback-icon">⏮</span>Previous</button>
+      <button type="button" data-control="next"><span class="playback-icon">⏭</span>Next</button>
+      <button type="button" data-control="volume_down"><span class="playback-icon">🔉</span>Volume &minus;</button>
+      <button type="button" data-control="volume_up"><span class="playback-icon">🔊</span>Volume +</button>
+      <button type="button" data-control="mute"><span class="playback-icon">🔇</span>Mute</button>
     </div>
     <p id="playbackMessage" class="message"></p>
   </section>
@@ -151,11 +159,33 @@
 
   <section>
     <h2>DSP</h2>
+    <h3>5-band equalizer</h3>
+    <div class="eq-grid">
+      <label class="eq-band"><span>80 Hz</span><input id="eq0" type="range" min="-12" max="12" step="0.5" value="0"><span id="eq0Value" class="eq-value">0.0 dB</span></label>
+      <label class="eq-band"><span>250 Hz</span><input id="eq1" type="range" min="-12" max="12" step="0.5" value="0"><span id="eq1Value" class="eq-value">0.0 dB</span></label>
+      <label class="eq-band"><span>1 kHz</span><input id="eq2" type="range" min="-12" max="12" step="0.5" value="0"><span id="eq2Value" class="eq-value">0.0 dB</span></label>
+      <label class="eq-band"><span>4 kHz</span><input id="eq3" type="range" min="-12" max="12" step="0.5" value="0"><span id="eq3Value" class="eq-value">0.0 dB</span></label>
+      <label class="eq-band"><span>12 kHz</span><input id="eq4" type="range" min="-12" max="12" step="0.5" value="0"><span id="eq4Value" class="eq-value">0.0 dB</span></label>
+    </div>
     <div class="row">
-      <button type="button" class="secondary" data-dsp-preset="flat">DSP off</button>
-      <button type="button" class="secondary" data-dsp-preset="night">Night mode</button>
-      <button type="button" class="secondary" data-dsp-preset="mono">Mono</button>
-      <button type="button" class="secondary" data-dsp-preset="speech">Speech</button>
+      <button id="bassBoostButton" type="button">🔊 Bass Boost</button>
+      <button id="loudnessButton" type="button">📈 Loudness</button>
+      <button id="flatButton" type="button" class="secondary">↺ Flat / Reset</button>
+    </div>
+    <div class="row">
+      <select id="eqPreset" aria-label="Equalizer preset">
+        <option value="flat">Flat</option>
+        <option value="bass">Bass Boost</option>
+        <option value="loudness">Loudness</option>
+        <option value="vocal">Vocal</option>
+        <option value="rock">Rock</option>
+        <option value="pop">Pop</option>
+        <option value="jazz">Jazz</option>
+        <option value="classical">Classical</option>
+        <option value="night">Night</option>
+      </select>
+      <button id="applyPresetButton" type="button">Apply Preset</button>
+      <button id="saveDspButton" type="button">Save Custom Preset</button>
     </div>
     <label><input id="dspOn" type="checkbox"> Enable DSP</label>
     <label><input id="limiter" type="checkbox" checked> Limiter</label>
@@ -183,7 +213,7 @@
       </select>
       <input id="crossHz" type="number" value="80" min="30" max="18000"> Hz
     </label>
-    <button id="saveDspButton" type="button">Apply DSP</button>
+    <p class="muted">Positive EQ gain automatically enables the limiter. Saved settings are restored after restart.</p>
     <p id="dspMessage" class="message"></p>
   </section>
 
@@ -218,9 +248,27 @@
         channel: document.getElementById('channel'),
         cross: document.getElementById('cross'),
         crossHz: document.getElementById('crossHz'),
+        eqPreset: document.getElementById('eqPreset'),
+        eqGains: [0, 1, 2, 3, 4].map(index =>
+          document.getElementById(`eq${index}`)),
+        eqValues: [0, 1, 2, 3, 4].map(index =>
+          document.getElementById(`eq${index}Value`)),
         dspMessage: document.getElementById('dspMessage'),
         refreshButton: document.getElementById('refreshButton'),
         diagnosticStatus: document.getElementById('diagnosticStatus')
+      };
+
+      const eqFrequencies = [80, 250, 1000, 4000, 12000];
+      const eqPresets = {
+        flat:      { label: 'Flat', gains: [0, 0, 0, 0, 0] },
+        bass:      { label: 'Bass Boost', gains: [6, 4, 1, 0, 0] },
+        loudness:  { label: 'Loudness', gains: [5, 3, 0, 2, 4] },
+        vocal:     { label: 'Vocal', gains: [-2, -1, 3, 4, 2] },
+        rock:      { label: 'Rock', gains: [4, 2, -1, 3, 4] },
+        pop:       { label: 'Pop', gains: [2, 3, 1, 3, 2] },
+        jazz:      { label: 'Jazz', gains: [3, 1, 0, 2, 4] },
+        classical: { label: 'Classical', gains: [2, 0, -1, 2, 3] },
+        night:     { label: 'Night', gains: [1, 2, 2, 1, 0], normalization: true }
       };
 
       elements.apiKey.value = localStorage.getItem('apiKey') || '';
@@ -290,6 +338,20 @@
         elements.channel.value = dsp.channel ?? 0;
         elements.cross.value = dsp.crossover ?? 0;
         elements.crossHz.value = dsp.crossover_hz ?? 80;
+        if (Array.isArray(dsp.bands)) {
+          elements.eqGains.forEach((slider, index) => {
+            slider.value = dsp.bands[index]?.gain_db ?? 0;
+          });
+        }
+        updateEqDisplays();
+      }
+
+      function updateEqDisplays() {
+        elements.eqGains.forEach((slider, index) => {
+          const gain = Number(slider.value);
+          elements.eqValues[index].textContent =
+            `${gain > 0 ? '+' : ''}${gain.toFixed(1)} dB`;
+        });
       }
 
       async function refreshDiagnostics() {
@@ -430,16 +492,22 @@
           : resultMessage(result, '');
       }
 
-      function applyQuickDspPreset(name) {
-        elements.dspOn.checked = name !== 'flat';
-        elements.limiter.checked = true;
-        elements.normalization.checked = name === 'night';
+      async function applyEqPreset(name) {
+        const preset = eqPresets[name];
+        if (!preset) return;
+        elements.dspOn.checked = true;
+        elements.normalization.checked = Boolean(preset.normalization);
         elements.balance.value = 0;
-        elements.channel.value = name === 'mono' ? 1 : 0;
-        elements.cross.value = name === 'speech' ? 1 : 0;
-        elements.crossHz.value = name === 'speech' ? 100 : 80;
-        elements.dspMessage.textContent =
-          'Preset selected. Press Apply DSP to activate it.';
+        elements.channel.value = 0;
+        elements.cross.value = 0;
+        elements.crossHz.value = 80;
+        elements.eqGains.forEach((slider, index) => {
+          slider.value = preset.gains[index];
+        });
+        elements.limiter.checked = preset.gains.some(gain => gain > 0);
+        elements.eqPreset.value = name;
+        updateEqDisplays();
+        await saveDsp(`${preset.label} preset applied and saved.`);
       }
 
       function downloadDiagnostics() {
@@ -472,7 +540,7 @@
         await refreshDiagnostics();
       }
 
-      async function saveDsp() {
+      async function saveDsp(successText = 'Custom preset saved.') {
         elements.dspMessage.textContent = 'Applying DSP settings...';
         const current = await api('/api/v1/dsp');
         if (!current.success) {
@@ -480,6 +548,10 @@
           return;
         }
 
+        const gains = elements.eqGains.map(slider => Number(slider.value));
+        if (gains.some(gain => gain > 0)) {
+          elements.limiter.checked = true;
+        }
         const body = {
           ...current,
           enabled: elements.dspOn.checked,
@@ -488,7 +560,12 @@
           balance: Number(elements.balance.value),
           channel: Number(elements.channel.value),
           crossover: Number(elements.cross.value),
-          crossover_hz: Number(elements.crossHz.value)
+          crossover_hz: Number(elements.crossHz.value),
+          bands: eqFrequencies.map((frequency, index) => ({
+            frequency_hz: frequency,
+            gain_db: gains[index],
+            q: 1.0
+          }))
         };
         delete body.success;
         delete body.http_status;
@@ -499,7 +576,7 @@
           body: JSON.stringify(body)
         });
         elements.dspMessage.textContent =
-          resultMessage(result, 'DSP settings applied.');
+          resultMessage(result, successText);
         applyDspValues(result);
         await refreshDiagnostics();
       }
@@ -527,10 +604,21 @@
       document.getElementById('downloadDiagnosticsButton')
         .addEventListener('click', downloadDiagnostics);
       document.getElementById('saveDspButton')
-        .addEventListener('click', saveDsp);
-      document.querySelectorAll('[data-dsp-preset]').forEach(button => {
-        button.addEventListener('click', () =>
-          applyQuickDspPreset(button.dataset.dspPreset));
+        .addEventListener('click', () => saveDsp('Custom preset saved.'));
+      document.getElementById('applyPresetButton')
+        .addEventListener('click', () => applyEqPreset(elements.eqPreset.value));
+      document.getElementById('bassBoostButton')
+        .addEventListener('click', () => applyEqPreset('bass'));
+      document.getElementById('loudnessButton')
+        .addEventListener('click', () => applyEqPreset('loudness'));
+      document.getElementById('flatButton')
+        .addEventListener('click', () => applyEqPreset('flat'));
+      elements.eqGains.forEach(slider => {
+        slider.addEventListener('input', () => {
+          elements.dspOn.checked = true;
+          if (Number(slider.value) > 0) elements.limiter.checked = true;
+          updateEqDisplays();
+        });
       });
       elements.refreshButton.addEventListener('click', refreshDiagnostics);
       document.querySelectorAll('[data-control]').forEach(button => {
@@ -539,6 +627,7 @@
       });
 
       loadPresets();
+      updateEqDisplays();
       refreshSleepTimer();
       refreshDiagnostics();
     })();
