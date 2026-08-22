@@ -39,11 +39,11 @@ jobs:
       - name: Upload installation files
         uses: actions/upload-artifact@v6
         with:
-          name: airplay-esp32s3-v0.3.00-bin-files
+          name: airplay-esp32s3-v3.0.1-bin-files
           path: |
-            airplay2-receiver-esp32s3-v0.3.00-install.bin
-            airplay2-receiver-esp32s3-v0.3.00-ota.bin
-            SHA256SUMS-v0.3.00.txt
+            airplay2-receiver-esp32s3-v3.0.1-install.bin
+            airplay2-receiver-esp32s3-v3.0.1-ota.bin
+            SHA256SUMS-v3.0.1.txt
             build/flash_args
             build/flasher_args.json
           if-no-files-found: error
