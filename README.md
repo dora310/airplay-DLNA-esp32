@@ -1,7 +1,7 @@
 
 <img src="docs/logo_airplay_esp32.png" alt="AirPlay ESP32" width="400">
 
-# ESP32 AirPlay 2 + DLNA Receiver
+# ESP32 AirPlay 2 Receiver
 
 [![GitHub stars](https://img.shields.io/github/stars/rbouteiller/airplay-esp32?style=flat-square)](https://github.com/rbouteiller/airplay-esp32/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/rbouteiller/airplay-esp32?style=flat-square)](https://github.com/rbouteiller/airplay-esp32/network)
