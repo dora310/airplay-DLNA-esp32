@@ -1,19 +1,381 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AirPlay Receiver Advanced</title><style>
-body{font:16px system-ui;background:#15182b;color:#f4f5ff;max-width:850px;margin:auto;padding:24px}section{background:#24283f;border-radius:16px;padding:20px;margin:16px 0}button,input,select{font:inherit;padding:10px;margin:5px;border:0;border-radius:8px}button{background:#ef476f;color:white}input{background:#111426;color:white;min-width:240px}pre{white-space:pre-wrap;color:#b7efcf}.row{display:flex;gap:8px;flex-wrap:wrap}label{display:block;margin:8px 0}.muted{color:#aeb2c6}</style></head><body>
-<h1>AirPlay Receiver <small>v0.3</small></h1><p><a href="/" style="color:#7ad7ff">← Basic settings</a></p>
-<section><h2>API access</h2><label>API password <input id="key" type="password" placeholder="Only needed after protection is enabled"></label><button onclick="setPassword()">Set/change password</button><p class="muted">Minimum 8 characters. Stored as a SHA-256 digest.</p></section>
-<section><h2>Playback</h2><div class="row"><button onclick="control('play_pause')">Play/Pause</button><button onclick="control('previous')">Previous</button><button onclick="control('next')">Next</button><button onclick="control('volume_down')">Volume −</button><button onclick="control('volume_up')">Volume +</button><button onclick="control('mute')">Mute</button></div></section>
-<section><h2>Internet radio</h2><input id="radio" placeholder="https://station/stream.mp3"><button onclick="radio()">Play URL</button></section>
-<section><h2>DSP</h2><label><input id="dspOn" type="checkbox"> Enable DSP</label><label><input id="limiter" type="checkbox" checked> Limiter</label><label><input id="normalization" type="checkbox"> Normalization</label><label>Balance −1…+1 <input id="balance" type="number" min="-1" max="1" step="0.05" value="0"></label><label>Channel <select id="channel"><option value="0">Stereo</option><option value="1">Mono</option><option value="2">Left</option><option value="3">Right</option><option value="4">Swap</option></select></label><label>Crossover <select id="cross"><option value="0">Off</option><option value="1">High-pass</option><option value="2">Low-pass</option></select> <input id="crossHz" type="number" value="80" min="30" max="18000"> Hz</label><button onclick="saveDSP()">Apply DSP</button></section>
-<section><h2>Status and diagnostics</h2><button onclick="refresh()">Refresh</button><pre id="status">Loading…</pre></section>
-<script>
-key.value=localStorage.getItem('apiKey')||'';
-const headers=()=>({'Content-Type':'application/json','X-API-Key':document.querySelector('#key').value||localStorage.getItem('apiKey')||''});
-async function api(url,opt={}){opt.headers={...headers(),...(opt.headers||{})};let r=await fetch(url,opt);let t=await r.text();try{return JSON.parse(t)}catch{return {error:t,status:r.status}}}
-async function control(action){await api('/api/v1/control',{method:'POST',body:JSON.stringify({action})});refresh()}
-async function radio(){alert(JSON.stringify(await api('/api/v1/radio',{method:'POST',body:JSON.stringify({url:document.querySelector('#radio').value})})))}
-async function setPassword(){let value=document.querySelector('#key').value;let result=await api('/api/v1/security/password',{method:'POST',body:JSON.stringify({password:value})});if(result.success)localStorage.setItem('apiKey',value);alert(JSON.stringify(result))}
-async function saveDSP(){let current=await api('/api/v1/dsp');let body={...current,enabled:dspOn.checked,limiter:limiter.checked,normalization:normalization.checked,balance:+balance.value,channel:+channel.value,crossover:+cross.value,crossover_hz:+crossHz.value};delete body.success;alert(JSON.stringify(await api('/api/v1/dsp',{method:'POST',body:JSON.stringify(body)})))}
-async function refresh(){let [s,h,d]=await Promise.all([api('/api/v1/status'),api('/api/v1/health'),api('/api/v1/dsp')]);status.textContent=JSON.stringify({status:s,health:h,dsp:d},null,2);if(d.success){dspOn.checked=d.enabled;limiter.checked=d.limiter;normalization.checked=d.normalization;balance.value=d.balance;channel.value=d.channel;cross.value=d.crossover;crossHz.value=d.crossover_hz}}
-refresh();</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AirPlay Receiver Advanced</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #15182b;
+      --panel: #24283f;
+      --field: #111426;
+      --text: #f4f5ff;
+      --muted: #aeb2c6;
+      --accent: #ef476f;
+      --link: #7ad7ff;
+      --good: #b7efcf;
+      --error: #ff9aa9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font: 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--background);
+      color: var(--text);
+      max-width: 850px;
+      margin: auto;
+      padding: 24px;
+    }
+    section {
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 20px;
+      margin: 16px 0;
+    }
+    button, input, select {
+      font: inherit;
+      padding: 10px;
+      margin: 5px;
+      border: 0;
+      border-radius: 8px;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled { cursor: wait; opacity: 0.65; }
+    input, select {
+      background: var(--field);
+      color: white;
+      min-width: 240px;
+    }
+    input[type="checkbox"] { min-width: auto; }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--good);
+      min-height: 1.5em;
+    }
+    pre.error { color: var(--error); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    label { display: block; margin: 8px 0; }
+    .muted { color: var(--muted); }
+    .message { min-height: 1.5em; color: var(--good); }
+    a { color: var(--link); }
+  </style>
+</head>
+<body>
+  <h1>AirPlay Receiver <small id="pageVersion"></small></h1>
+  <p><a href="/">&larr; Basic settings</a></p>
+
+  <section>
+    <h2>API access</h2>
+    <label>
+      Current API password
+      <input id="apiKey" type="password" autocomplete="current-password"
+             placeholder="Required only when protection is enabled">
+    </label>
+    <button id="saveApiKeyButton" type="button">Remember API password</button>
+    <label>
+      New API password
+      <input id="newPassword" type="password" autocomplete="new-password"
+             placeholder="Enter 8-64 characters">
+    </label>
+    <button id="setPasswordButton" type="button">Set/change password</button>
+    <p class="muted">
+      The current password authorizes protected requests. The new password must
+      contain 8-64 characters. Enter an empty new password to disable protection.
+    </p>
+    <p id="securityMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Playback</h2>
+    <div class="row">
+      <button type="button" data-control="play_pause">Play/Pause</button>
+      <button type="button" data-control="previous">Previous</button>
+      <button type="button" data-control="next">Next</button>
+      <button type="button" data-control="volume_down">Volume &minus;</button>
+      <button type="button" data-control="volume_up">Volume +</button>
+      <button type="button" data-control="mute">Mute</button>
+    </div>
+    <p id="playbackMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Internet radio</h2>
+    <input id="radioUrl" type="url" inputmode="url"
+           placeholder="https://station/stream.mp3">
+    <button id="radioButton" type="button">Play URL</button>
+    <p id="radioMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>DSP</h2>
+    <label><input id="dspOn" type="checkbox"> Enable DSP</label>
+    <label><input id="limiter" type="checkbox" checked> Limiter</label>
+    <label><input id="normalization" type="checkbox"> Normalization</label>
+    <label>
+      Balance -1 to +1
+      <input id="balance" type="number" min="-1" max="1" step="0.05" value="0">
+    </label>
+    <label>
+      Channel
+      <select id="channel">
+        <option value="0">Stereo</option>
+        <option value="1">Mono</option>
+        <option value="2">Left</option>
+        <option value="3">Right</option>
+        <option value="4">Swap</option>
+      </select>
+    </label>
+    <label>
+      Crossover
+      <select id="cross">
+        <option value="0">Off</option>
+        <option value="1">High-pass</option>
+        <option value="2">Low-pass</option>
+      </select>
+      <input id="crossHz" type="number" value="80" min="30" max="18000"> Hz
+    </label>
+    <button id="saveDspButton" type="button">Apply DSP</button>
+    <p id="dspMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Status and diagnostics</h2>
+    <button id="refreshButton" type="button">Refresh</button>
+    <pre id="diagnosticStatus" aria-live="polite">Loading...</pre>
+  </section>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const elements = {
+        apiKey: document.getElementById('apiKey'),
+        newPassword: document.getElementById('newPassword'),
+        pageVersion: document.getElementById('pageVersion'),
+        securityMessage: document.getElementById('securityMessage'),
+        playbackMessage: document.getElementById('playbackMessage'),
+        radioUrl: document.getElementById('radioUrl'),
+        radioMessage: document.getElementById('radioMessage'),
+        dspOn: document.getElementById('dspOn'),
+        limiter: document.getElementById('limiter'),
+        normalization: document.getElementById('normalization'),
+        balance: document.getElementById('balance'),
+        channel: document.getElementById('channel'),
+        cross: document.getElementById('cross'),
+        crossHz: document.getElementById('crossHz'),
+        dspMessage: document.getElementById('dspMessage'),
+        refreshButton: document.getElementById('refreshButton'),
+        diagnosticStatus: document.getElementById('diagnosticStatus')
+      };
+
+      elements.apiKey.value = localStorage.getItem('apiKey') || '';
+
+      function requestHeaders() {
+        const headers = { Accept: 'application/json' };
+        const key = elements.apiKey.value ||
+                    localStorage.getItem('apiKey') || '';
+        if (key) headers['X-API-Key'] = key;
+        return headers;
+      }
+
+      async function api(url, options = {}) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        try {
+          const response = await fetch(url, {
+            ...options,
+            cache: 'no-store',
+            signal: controller.signal,
+            headers: {
+              ...requestHeaders(),
+              ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+              ...(options.headers || {})
+            }
+          });
+          const text = await response.text();
+          let data;
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch (error) {
+            data = {
+              success: false,
+              error: text || 'The device returned invalid JSON.'
+            };
+          }
+          data.http_status = response.status;
+          data.http_ok = response.ok;
+          return data;
+        } catch (error) {
+          return {
+            success: false,
+            error: error.name === 'AbortError'
+              ? 'Request timed out after 8 seconds.'
+              : `Network request failed: ${error.message}`,
+            http_status: 0,
+            http_ok: false
+          };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      function resultMessage(result, successText) {
+        if (result && result.success && result.http_ok !== false) {
+          return successText;
+        }
+        return (result && result.error) ||
+          `Request failed with HTTP status ${result ? result.http_status : 'unknown'}.`;
+      }
+
+      function applyDspValues(dsp) {
+        if (!dsp || !dsp.success) return;
+        elements.dspOn.checked = Boolean(dsp.enabled);
+        elements.limiter.checked = Boolean(dsp.limiter);
+        elements.normalization.checked = Boolean(dsp.normalization);
+        elements.balance.value = dsp.balance ?? 0;
+        elements.channel.value = dsp.channel ?? 0;
+        elements.cross.value = dsp.crossover ?? 0;
+        elements.crossHz.value = dsp.crossover_hz ?? 80;
+      }
+
+      async function refreshDiagnostics() {
+        elements.refreshButton.disabled = true;
+        elements.refreshButton.textContent = 'Refreshing...';
+        elements.diagnosticStatus.classList.remove('error');
+        elements.diagnosticStatus.textContent = 'Loading...';
+        try {
+          const [statusResult, healthResult, dspResult] = await Promise.all([
+            api('/api/v1/status'),
+            api('/api/v1/health'),
+            api('/api/v1/dsp')
+          ]);
+
+          if (statusResult.version) {
+            elements.pageVersion.textContent = `v${statusResult.version}`;
+          }
+          applyDspValues(dspResult);
+
+          const failed = [statusResult, healthResult, dspResult]
+            .some(result =>
+              result.http_ok === false || result.success === false);
+          elements.diagnosticStatus.classList.toggle('error', failed);
+          elements.diagnosticStatus.textContent = JSON.stringify({
+            refreshed_at: new Date().toLocaleString(),
+            status: statusResult,
+            health: healthResult,
+            dsp: dspResult
+          }, null, 2);
+        } catch (error) {
+          elements.diagnosticStatus.classList.add('error');
+          elements.diagnosticStatus.textContent =
+            `Unexpected page error: ${error.message}`;
+        } finally {
+          elements.refreshButton.disabled = false;
+          elements.refreshButton.textContent = 'Refresh';
+        }
+      }
+
+      async function sendControl(action) {
+        elements.playbackMessage.textContent = `Sending ${action}...`;
+        const result = await api('/api/v1/control', {
+          method: 'POST',
+          body: JSON.stringify({ action })
+        });
+        elements.playbackMessage.textContent =
+          resultMessage(result, 'Command sent.');
+        await refreshDiagnostics();
+      }
+
+      async function playRadio() {
+        const url = elements.radioUrl.value.trim();
+        if (!url) {
+          elements.radioMessage.textContent = 'Enter a stream URL first.';
+          return;
+        }
+        elements.radioMessage.textContent = 'Starting stream...';
+        const result = await api('/api/v1/radio', {
+          method: 'POST',
+          body: JSON.stringify({ url })
+        });
+        elements.radioMessage.textContent =
+          resultMessage(result, 'Internet radio started.');
+      }
+
+      async function setPassword() {
+        const newPassword = elements.newPassword.value;
+        elements.securityMessage.textContent = 'Updating password...';
+        const result = await api('/api/v1/security/password', {
+          method: 'POST',
+          body: JSON.stringify({ password: newPassword })
+        });
+        if (result.success && result.http_ok !== false) {
+          localStorage.setItem('apiKey', newPassword);
+          elements.apiKey.value = newPassword;
+          elements.newPassword.value = '';
+        }
+        elements.securityMessage.textContent =
+          resultMessage(result, 'API password updated.');
+        await refreshDiagnostics();
+      }
+
+      async function saveDsp() {
+        elements.dspMessage.textContent = 'Applying DSP settings...';
+        const current = await api('/api/v1/dsp');
+        if (!current.success) {
+          elements.dspMessage.textContent = resultMessage(current, '');
+          return;
+        }
+
+        const body = {
+          ...current,
+          enabled: elements.dspOn.checked,
+          limiter: elements.limiter.checked,
+          normalization: elements.normalization.checked,
+          balance: Number(elements.balance.value),
+          channel: Number(elements.channel.value),
+          crossover: Number(elements.cross.value),
+          crossover_hz: Number(elements.crossHz.value)
+        };
+        delete body.success;
+        delete body.http_status;
+        delete body.http_ok;
+
+        const result = await api('/api/v1/dsp', {
+          method: 'POST',
+          body: JSON.stringify(body)
+        });
+        elements.dspMessage.textContent =
+          resultMessage(result, 'DSP settings applied.');
+        applyDspValues(result);
+        await refreshDiagnostics();
+      }
+
+      document.getElementById('saveApiKeyButton')
+        .addEventListener('click', () => {
+          localStorage.setItem('apiKey', elements.apiKey.value);
+          elements.securityMessage.textContent =
+            'API password remembered in this browser.';
+          refreshDiagnostics();
+        });
+      document.getElementById('setPasswordButton')
+        .addEventListener('click', setPassword);
+      document.getElementById('radioButton')
+        .addEventListener('click', playRadio);
+      document.getElementById('saveDspButton')
+        .addEventListener('click', saveDsp);
+      elements.refreshButton.addEventListener('click', refreshDiagnostics);
+      document.querySelectorAll('[data-control]').forEach(button => {
+        button.addEventListener('click',
+          () => sendControl(button.dataset.control));
+      });
+
+      refreshDiagnostics();
+    })();
+  </script>
+</body>
+</html>
