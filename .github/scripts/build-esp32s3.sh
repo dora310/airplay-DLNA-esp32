@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-version="v0.3.00"
+version="v3.0.1"
 app_name="airplay2-receiver"
 ota_file="${app_name}-esp32s3-${version}-ota.bin"
 install_file="${app_name}-esp32s3-${version}-install.bin"
