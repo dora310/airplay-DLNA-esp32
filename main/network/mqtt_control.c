@@ -47,7 +47,11 @@ static void publish_state(void) {
 static void publish_discovery(void) {
   if (!s_config.home_assistant_discovery) return;
   char device_name[65], topic[192], command_topic[160], state_topic[160];
-  char attributes_topic[160], availability_topic[160], payload[1024];
+  // The maximum configured device name and topic prefix can produce a Home
+  // Assistant discovery document slightly larger than 1 KiB.  Keep this
+  // fixed-size buffer comfortably above the compiler-proven 1133-byte bound;
+  // builds use -Werror=format-truncation so undersizing this is a hard error.
+  char attributes_topic[160], availability_topic[160], payload[1536];
   settings_get_device_name(device_name, sizeof(device_name));
   make_topic(command_topic, sizeof(command_topic), "command");
   make_topic(state_topic, sizeof(state_topic), "state");
