@@ -242,13 +242,6 @@
   </section>
 
   <section>
-    <h2>Status and diagnostics</h2>
-    <button id="refreshButton" type="button">Refresh</button>
-    <button id="downloadDiagnosticsButton" class="secondary" type="button">Download JSON</button>
-    <pre id="diagnosticStatus" aria-live="polite">Loading...</pre>
-  </section>
-
-  <section>
     <h2>Audio protection</h2>
     <label><input id="speakerProtection" type="checkbox"> Enable speaker protection</label>
     <label>
@@ -313,6 +306,13 @@
            placeholder="Type ERASE ALL SETTINGS">
     <button id="factoryResetButton" type="button">Erase all settings</button>
     <p id="factoryMessage" class="message"></p>
+  </section>
+
+  <section>
+    <h2>Status and diagnostics</h2>
+    <button id="refreshButton" type="button">Refresh</button>
+    <button id="downloadDiagnosticsButton" class="secondary" type="button">Download JSON</button>
+    <pre id="diagnosticStatus" aria-live="polite">Loading...</pre>
   </section>
 
   <script>
