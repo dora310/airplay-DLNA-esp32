@@ -14,6 +14,8 @@
 - GitHub Release update checks and matching-target OTA installation.
 - OTA product validation and existing bootloader rollback protection.
 - New `/reliability` control page and JSON APIs.
+- Build fix: increase the Home Assistant MQTT discovery buffer so maximum
+  device/topic names compile safely with `-Werror=format-truncation`.
 
 ## Compatibility
 
