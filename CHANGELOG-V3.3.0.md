@@ -19,6 +19,9 @@
 - New Apple-inspired Liquid Glass interface across the main panel, advanced
   controls, reliability, equalizer, logs and speed-test pages. Includes matched
   light/dark modes, mobile layouts and reduced-motion accessibility support.
+- Liquid Glass revision 3: improve secondary/disabled button contrast in Light
+  and Auto-Light modes and replace all checkboxes with accessible iPhone-style
+  on/off switches.
 
 ## Compatibility
 

@@ -14,6 +14,8 @@ PASS  reliability page is linked and served at /reliability
 PASS  embedded JavaScript parses on all six control-panel pages
 PASS  Liquid Glass CSS blocks have balanced syntax on all six pages
 PASS  Home Assistant discovery buffer exceeds the compiler-proven maximum
+PASS  all checkbox controls retain their IDs and expose switch semantics
+PASS  light and automatic-light modes define readable secondary-button text
 
 ESP-IDF compilation is intentionally delegated to the included GitHub Actions
 workflow. A local ESP-IDF 5.5/Xtensa toolchain was not available in the
