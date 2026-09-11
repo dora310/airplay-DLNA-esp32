@@ -495,7 +495,20 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // The 256-attempt drain loop chews through stale frames at zero
           // wall-time cost, skipping past arbitrarily many stale frames in
           // one pass without the DMA ever idling.
-          ESP_LOGW(TAG, "Dropping late frame: %lld ms", -early_us / 1000LL);
+          /*
+           * Do not log every stale frame.  A large backlog can contain
+           * hundreds of frames; formatting and broadcasting one warning per
+           * frame prevents the drain loop from catching up and makes the
+           * lateness progressively worse.  Report at most once per second
+           * while continuing to discard stale frames at full speed.
+           */
+          static int64_t last_late_log_us = 0;
+          int64_t now_us = esp_timer_get_time();
+          if (now_us - last_late_log_us >= 1000000LL) {
+            ESP_LOGW(TAG, "Dropping late frame: %lld ms",
+                     -early_us / 1000LL);
+            last_late_log_us = now_us;
+          }
           if (stats) {
             stats->late_frames++;
           }
