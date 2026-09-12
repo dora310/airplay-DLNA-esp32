@@ -80,11 +80,22 @@ function colorize(text){
   while(log.childNodes.length>maxLines+1)log.removeChild(log.firstChild);
   if(autoScroll)anchor.scrollIntoView();
 }
-function connect(){
-  var ws=new WebSocket('ws://'+location.host+'/ws/logs');
-  ws.onopen=function(){dot.classList.add('ok');};
-  ws.onclose=function(){dot.classList.remove('ok');setTimeout(connect,2000);};
-  ws.onmessage=function(e){colorize(e.data);};
+var polling=false;
+async function pollLogs(){
+  if(polling)return;
+  polling=true;
+  try{
+    var response=await fetch('/api/logs/live',{cache:'no-store'});
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    var text=await response.text();
+    if(text)colorize(text);
+    dot.classList.add('ok');
+  }catch(error){
+    dot.classList.remove('ok');
+  }finally{
+    polling=false;
+    setTimeout(pollLogs,750);
+  }
 }
-connect();
+pollLogs();
 </script></body></html>
