@@ -51,6 +51,14 @@ esp_err_t audio_output_write_pcm(int16_t *data, size_t frames,
                                  TickType_t wait);
 
 /**
+ * Write mutable stereo PCM through channel routing and software DSP without
+ * applying the AirPlay volume gain. Sources which already applied their own
+ * volume (for example DLNA RenderingControl) use this to avoid scaling twice.
+ */
+esp_err_t audio_output_write_pcm_unscaled(int16_t *data, size_t frames,
+                                          TickType_t wait);
+
+/**
  * Change the I2S sample rate (e.g. when BT negotiates 48 kHz)
  *
  * @param rate  Sample rate in Hz (e.g. 44100, 48000)

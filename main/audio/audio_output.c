@@ -229,6 +229,14 @@ esp_err_t audio_output_write_pcm(int16_t *data, size_t frames,
     return ESP_ERR_INVALID_ARG;
   }
   apply_volume(data, frames * 2);
+  return audio_output_write_pcm_unscaled(data, frames, wait);
+}
+
+esp_err_t audio_output_write_pcm_unscaled(int16_t *data, size_t frames,
+                                          TickType_t wait) {
+  if (!data) {
+    return ESP_ERR_INVALID_ARG;
+  }
   apply_channel_mode(data, frames);
   software_dsp_process(data, frames, 2);
   led_audio_feed(data, frames);
