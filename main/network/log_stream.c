@@ -35,7 +35,6 @@
 #define BROADCAST_TASK_STACK  4096
 #define BROADCAST_INTERVAL_MS 100
 #define MAX_SEND_CHUNK        1024
-#define WS_KEEPALIVE_INTERVAL_MS 15000
 
 static char *s_ring;
 static volatile size_t s_head; /* next write position  */
@@ -282,10 +281,51 @@ static void remove_client(int index) {
   s_client_count--;
 }
 
+typedef struct {
+  size_t len;
+  uint8_t payload[];
+} ws_broadcast_job_t;
+
+/* Runs in the HTTP server task. ESP-IDF requires asynchronous WebSocket sends
+   to be queued into this context; sending directly from the log task can race
+   request/control-frame processing and corrupt the WebSocket framing. */
+static void broadcast_work(void *arg) {
+  ws_broadcast_job_t *job = (ws_broadcast_job_t *)arg;
+  if (!job) {
+    return;
+  }
+
+  httpd_ws_frame_t frame = {
+      .type = HTTPD_WS_TYPE_TEXT,
+      .payload = job->payload,
+      .len = job->len,
+  };
+
+  if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    for (int i = s_client_count - 1; i >= 0; i--) {
+      int fd = s_clients[i];
+      if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+        remove_client(i);
+        continue;
+      }
+
+      esp_err_t err = httpd_ws_send_frame_async(s_server, fd, &frame);
+      if (err != ESP_OK) {
+        /* Closing a browser tab is normal and unrelated to AirPlay. */
+        ESP_LOGD("log_stream", "Removing WebSocket client fd=%d: %s", fd,
+                 esp_err_to_name(err));
+        remove_client(i);
+      }
+    }
+    xSemaphoreGive(s_client_mutex);
+  }
+
+  free(job);
+}
+
 static void broadcast_task(void *arg) {
   (void)arg;
   char buf[MAX_SEND_CHUNK];
-  TickType_t last_keepalive = xTaskGetTickCount();
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(BROADCAST_INTERVAL_MS));
@@ -299,58 +339,20 @@ static void broadcast_task(void *arg) {
       len = ring_read(buf, sizeof(buf));
       xSemaphoreGive(s_mutex);
     }
-    TickType_t now = xTaskGetTickCount();
-    bool send_keepalive =
-        (now - last_keepalive) >= pdMS_TO_TICKS(WS_KEEPALIVE_INTERVAL_MS);
-    if (len == 0 && !send_keepalive) {
+    if (len == 0) {
       continue;
     }
 
-    httpd_ws_frame_t frame = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)buf,
-        .len = len,
-    };
-
-    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      for (int i = s_client_count - 1; i >= 0; i--) {
-        int fd = s_clients[i];
-
-        /* A numeric fd can be closed and reused for an ordinary HTTP request.
-           Never send a WebSocket frame until the server confirms its type. */
-        if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-          ESP_LOGD("log_stream", "Removing closed WebSocket client fd=%d", fd);
-          remove_client(i);
-          continue;
-        }
-
-        esp_err_t err = ESP_OK;
-        if (len > 0) {
-          err = httpd_ws_send_frame_async(s_server, fd, &frame);
-        }
-
-        if (err == ESP_OK && send_keepalive) {
-          httpd_ws_frame_t ping = {
-              .type = HTTPD_WS_TYPE_PING,
-              .payload = NULL,
-              .len = 0,
-          };
-          err = httpd_ws_send_frame_async(s_server, fd, &ping);
-        }
-
-        if (err != ESP_OK) {
-          /* A browser tab closing is expected. Remove it quietly; it has no
-             relationship to the RTSP/AirPlay connection. */
-          ESP_LOGD("log_stream", "Removing WebSocket client fd=%d: %s", fd,
-                   esp_err_to_name(err));
-          remove_client(i);
-        }
-      }
-      xSemaphoreGive(s_client_mutex);
+    ws_broadcast_job_t *job = malloc(sizeof(*job) + len);
+    if (!job) {
+      continue;
     }
+    job->len = len;
+    memcpy(job->payload, buf, len);
 
-    if (send_keepalive) {
-      last_keepalive = now;
+    esp_err_t err = httpd_queue_work(s_server, broadcast_work, job);
+    if (err != ESP_OK) {
+      free(job);
     }
   }
 }
