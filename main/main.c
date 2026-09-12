@@ -223,6 +223,10 @@ static void on_airplay_client_event(rtsp_event_t event,
 #endif
 
 void app_main(void) {
+  /* Unique marker for the AirPlay connection-stability replacement build.
+   * Check the USB serial log for this exact line after flashing. */
+  ESP_LOGI(TAG, "AIRPLAY-STABILITY-R1: amended firmware is running");
+
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
