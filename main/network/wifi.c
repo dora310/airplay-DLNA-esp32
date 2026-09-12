@@ -313,13 +313,26 @@ static void wifi_select_best_ap(const char *ssid) {
     }
   }
 
-  // Set BSSID in the STA config to lock to the best AP
+  /*
+   * Do not lock the station to one BSSID. Mesh systems such as Eero expose
+   * several access points under the same SSID, and pinning the ESP32 to the
+   * BSSID selected during the startup scan can cause repeated disconnects
+   * when the mesh changes the preferred node. Keep the scan above for useful
+   * diagnostics, but let ESP-IDF select and roam between matching APs.
+   */
   wifi_config_t sta_cfg;
-  esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
-  memcpy(sta_cfg.sta.bssid, ap_list[best_idx].bssid, 6);
-  sta_cfg.sta.bssid_set = true;
-  esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-  s_bssid_set = true;
+  if (esp_wifi_get_config(WIFI_IF_STA, &sta_cfg) == ESP_OK) {
+    sta_cfg.sta.bssid_set = false;
+    memset(sta_cfg.sta.bssid, 0, sizeof(sta_cfg.sta.bssid));
+    sta_cfg.sta.channel = 0;
+
+    esp_err_t config_err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    if (config_err != ESP_OK) {
+      ESP_LOGW(TAG, "Could not enable automatic AP selection: %s",
+               esp_err_to_name(config_err));
+    }
+  }
+  s_bssid_set = false;
 
   free(ap_list);
 }
