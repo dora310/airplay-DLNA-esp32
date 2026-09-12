@@ -806,12 +806,15 @@ esp_err_t web_server_start(uint16_t port) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = port;
 #ifdef CONFIG_BT_ENABLED
-  config.max_open_sockets = 2;   // BT: tighter socket budget (LWIP 12)
+  config.max_open_sockets = 3;   // One log WebSocket + two control requests
   config.send_wait_timeout = 10; // BT/WiFi coexistence slows TCP drain
 #else
-  config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
+  config.max_open_sockets = 4; // Log WebSocket + parallel control requests
 #endif
-  config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
+  /* Do not let a new control-panel request evict the long-lived log
+     WebSocket. log_stream.c validates and removes closed WebSocket clients,
+     so LRU purging is both unnecessary and harmful here. */
+  config.lru_purge_enable = false;
   config.max_uri_handlers =
       64; // Captive portal + v3.3 reliability API + EQ + speedtest + DLNA
   config.max_resp_headers = 8;

@@ -16,8 +16,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Ring buffer size — must be power of two for masking. */
@@ -33,6 +35,7 @@
 #define BROADCAST_TASK_STACK  4096
 #define BROADCAST_INTERVAL_MS 100
 #define MAX_SEND_CHUNK        1024
+#define WS_KEEPALIVE_INTERVAL_MS 15000
 
 static char *s_ring;
 static volatile size_t s_head; /* next write position  */
@@ -188,11 +191,23 @@ static esp_err_t ws_log_handler(httpd_req_t *req) {
     /* Handshake — register this socket. */
     int fd = httpd_req_to_sockfd(req);
     if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      if (s_client_count < MAX_WS_CLIENTS) {
+      bool already_registered = false;
+      for (int i = 0; i < s_client_count; i++) {
+        if (s_clients[i] == fd) {
+          already_registered = true;
+          break;
+        }
+      }
+
+      if (already_registered) {
+        xSemaphoreGive(s_client_mutex);
+        return ESP_OK;
+      } else if (s_client_count < MAX_WS_CLIENTS) {
         s_clients[s_client_count++] = fd;
+        int total = s_client_count;
         xSemaphoreGive(s_client_mutex);
         ESP_LOGI("log_stream", "WebSocket client connected (fd=%d, total=%d)",
-                 fd, s_client_count);
+                 fd, total);
       } else {
         xSemaphoreGive(s_client_mutex);
         ESP_LOGW("log_stream", "Max WebSocket clients reached, rejecting fd=%d",
@@ -206,9 +221,54 @@ static esp_err_t ws_log_handler(httpd_req_t *req) {
     return ESP_OK;
   }
 
-  /* We only stream logs out; ignore any incoming frames. */
-  httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_TEXT};
-  return httpd_ws_recv_frame(req, &frame, 0);
+  /* Consume complete control frames. Reading only the frame header leaves a
+     CLOSE/PONG payload queued in the HTTP server and can make the fd stale. */
+  int fd = httpd_req_to_sockfd(req);
+  httpd_ws_frame_t frame = {0};
+  esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint8_t *payload = NULL;
+  if (frame.len > 0) {
+    payload = malloc(frame.len + 1);
+    if (!payload) {
+      return ESP_ERR_NO_MEM;
+    }
+    frame.payload = payload;
+    err = httpd_ws_recv_frame(req, &frame, frame.len);
+    if (err != ESP_OK) {
+      free(payload);
+      return err;
+    }
+    payload[frame.len] = '\0';
+  }
+
+  if (frame.type == HTTPD_WS_TYPE_PING) {
+    httpd_ws_frame_t pong = {
+        .type = HTTPD_WS_TYPE_PONG,
+        .payload = frame.payload,
+        .len = frame.len,
+    };
+    err = httpd_ws_send_frame(req, &pong);
+  } else if (frame.type == HTTPD_WS_TYPE_CLOSE) {
+    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      for (int i = s_client_count - 1; i >= 0; i--) {
+        if (s_clients[i] == fd) {
+          if (i < s_client_count - 1) {
+            s_clients[i] = s_clients[s_client_count - 1];
+          }
+          s_client_count--;
+          break;
+        }
+      }
+      xSemaphoreGive(s_client_mutex);
+    }
+  }
+
+  free(payload);
+  return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -225,6 +285,7 @@ static void remove_client(int index) {
 static void broadcast_task(void *arg) {
   (void)arg;
   char buf[MAX_SEND_CHUNK];
+  TickType_t last_keepalive = xTaskGetTickCount();
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(BROADCAST_INTERVAL_MS));
@@ -238,7 +299,10 @@ static void broadcast_task(void *arg) {
       len = ring_read(buf, sizeof(buf));
       xSemaphoreGive(s_mutex);
     }
-    if (len == 0) {
+    TickType_t now = xTaskGetTickCount();
+    bool send_keepalive =
+        (now - last_keepalive) >= pdMS_TO_TICKS(WS_KEEPALIVE_INTERVAL_MS);
+    if (len == 0 && !send_keepalive) {
       continue;
     }
 
@@ -250,15 +314,43 @@ static void broadcast_task(void *arg) {
 
     if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       for (int i = s_client_count - 1; i >= 0; i--) {
-        esp_err_t err =
-            httpd_ws_send_frame_async(s_server, s_clients[i], &frame);
+        int fd = s_clients[i];
+
+        /* A numeric fd can be closed and reused for an ordinary HTTP request.
+           Never send a WebSocket frame until the server confirms its type. */
+        if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+          ESP_LOGD("log_stream", "Removing closed WebSocket client fd=%d", fd);
+          remove_client(i);
+          continue;
+        }
+
+        esp_err_t err = ESP_OK;
+        if (len > 0) {
+          err = httpd_ws_send_frame_async(s_server, fd, &frame);
+        }
+
+        if (err == ESP_OK && send_keepalive) {
+          httpd_ws_frame_t ping = {
+              .type = HTTPD_WS_TYPE_PING,
+              .payload = NULL,
+              .len = 0,
+          };
+          err = httpd_ws_send_frame_async(s_server, fd, &ping);
+        }
+
         if (err != ESP_OK) {
-          ESP_LOGW("log_stream", "Dropping WebSocket client fd=%d: %s",
-                   s_clients[i], esp_err_to_name(err));
+          /* A browser tab closing is expected. Remove it quietly; it has no
+             relationship to the RTSP/AirPlay connection. */
+          ESP_LOGD("log_stream", "Removing WebSocket client fd=%d: %s", fd,
+                   esp_err_to_name(err));
           remove_client(i);
         }
       }
       xSemaphoreGive(s_client_mutex);
+    }
+
+    if (send_keepalive) {
+      last_keepalive = now;
     }
   }
 }
