@@ -247,7 +247,8 @@ static void on_airplay_client_event(rtsp_event_t event,
 #endif
 
 void app_main(void) {
-  ESP_LOGI(TAG, "NETWORK-RECOVERY-R7: strongest-AP and DLNA event fix active");
+  ESP_LOGI(TAG,
+           "AIRPLAY-STABILITY-R8: serialized RTSP reconnect cleanup active");
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
@@ -261,6 +262,17 @@ void app_main(void) {
   ESP_ERROR_CHECK(recovery_init());
   spiffs_storage_init();
   log_stream_init();
+  recovery_status_t boot_status;
+  recovery_get_status(&boot_status);
+  if (boot_status.reset_reason == ESP_RST_PANIC ||
+      boot_status.reset_reason == ESP_RST_INT_WDT ||
+      boot_status.reset_reason == ESP_RST_TASK_WDT ||
+      boot_status.reset_reason == ESP_RST_WDT) {
+    ESP_LOGW(TAG, "Previous boot crashed: reset_reason=%d consecutive=%u",
+             boot_status.reset_reason, boot_status.consecutive_crashes);
+  } else {
+    ESP_LOGI(TAG, "Previous reset reason: %d", boot_status.reset_reason);
+  }
   ESP_ERROR_CHECK(playback_control_init());
   led_init();
 
