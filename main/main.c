@@ -247,7 +247,7 @@ static void on_airplay_client_event(rtsp_event_t event,
 #endif
 
 void app_main(void) {
-  ESP_LOGI(TAG, "NETWORK-RECOVERY-R6: amended firmware is running");
+  ESP_LOGI(TAG, "NETWORK-RECOVERY-R7: strongest-AP and DLNA event fix active");
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
