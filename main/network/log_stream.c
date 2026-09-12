@@ -1,9 +1,10 @@
 /**
  * Polling-based log streaming over HTTP.
  *
- * Intercepts ESP-IDF log output via esp_log_set_vprintf(), stores lines
- * in a ring buffer. The browser periodically drains new lines through
- * /api/logs/live. UART output is preserved.
+ * Intercepts ESP-IDF log output via esp_log_set_vprintf(). The hook only
+ * copies formatted lines into a non-blocking queue; a dedicated worker owns
+ * the browser ring and persistent SPIFFS writes. The browser periodically
+ * drains new lines through /api/logs/live. UART output is preserved.
  */
 
 #include "log_stream.h"
@@ -13,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -23,34 +25,37 @@
 #include <string.h>
 
 /* Ring buffer size — must be power of two for masking. */
-#define LOG_RING_SIZE 8192
-#define LOG_RING_MASK (LOG_RING_SIZE - 1)
+#define LOG_RING_SIZE  8192
+#define LOG_RING_MASK  (LOG_RING_SIZE - 1)
 #define DIAG_RING_SIZE 4096
 #define DIAG_RING_MASK (DIAG_RING_SIZE - 1)
-#define DIAG_FILE "/spiffs/diagnostics.log"
-#define DIAG_FILE_OLD "/spiffs/diagnostics.old.log"
-#define DIAG_FILE_MAX 12288
+#define DIAG_FILE      "/spiffs/diagnostics.log"
+#define DIAG_FILE_OLD  "/spiffs/diagnostics.old.log"
+#define DIAG_FILE_MAX  12288
 
-#define LIVE_LOG_CHUNK 2048
+#define LIVE_LOG_CHUNK         2048
+#define LOG_RECORD_TEXT_SIZE   256
+#define LOG_QUEUE_LENGTH       24
+#define LOG_WORKER_STACK_SIZE  8192
+#define DIAG_FLUSH_INTERVAL_MS 5000
 
-/*
- * Temporary diagnostic switch.
- *
- * The log capture hook runs in the context of every task that writes an
- * ESP-IDF log, and the persistent writer also performs SPIFFS/newlib file I/O.
- * Disable both pieces during the stability test while preserving ordinary
- * UART logging and the rest of the web control panel.
- */
-#define TEMP_DISABLE_LOG_STREAM 1
+typedef struct {
+  uint16_t length;
+  bool diagnostic;
+  char text[LOG_RECORD_TEXT_SIZE];
+} log_record_t;
 
 static char *s_ring;
 static volatile size_t s_head; /* next write position  */
 static volatile size_t s_tail; /* next read position   */
 static SemaphoreHandle_t s_mutex;
+static SemaphoreHandle_t s_file_mutex;
 static char *s_diag_ring;
 static volatile size_t s_diag_head;
 static volatile size_t s_diag_tail;
 static volatile uint32_t s_diag_dropped;
+static QueueHandle_t s_log_queue;
+static bool s_initialized;
 
 static vprintf_like_t s_orig_vprintf;
 
@@ -77,7 +82,8 @@ static void diag_ring_write(const char *data, size_t len) {
   for (size_t i = 0; i < len; i++) {
     size_t next = (s_diag_head + 1) & DIAG_RING_MASK;
     if (next == (s_diag_tail & DIAG_RING_MASK)) {
-      s_diag_dropped++;
+      __atomic_fetch_add(&s_diag_dropped, (uint32_t)(len - i),
+                         __ATOMIC_RELAXED);
       break;
     }
     s_diag_ring[s_diag_head & DIAG_RING_MASK] = data[i];
@@ -87,7 +93,8 @@ static void diag_ring_write(const char *data, size_t len) {
 
 static size_t diag_ring_read(char *buf, size_t max) {
   size_t used = (s_diag_head - s_diag_tail) & DIAG_RING_MASK;
-  if (used > max) used = max;
+  if (used > max)
+    used = max;
   for (size_t i = 0; i < used; i++) {
     buf[i] = s_diag_ring[s_diag_tail & DIAG_RING_MASK];
     s_diag_tail = (s_diag_tail + 1) & DIAG_RING_MASK;
@@ -96,8 +103,10 @@ static size_t diag_ring_read(char *buf, size_t max) {
 }
 
 static bool is_diagnostic_line(const char *line) {
-  if (!line) return false;
-  while (*line == '\r' || *line == '\n' || *line == ' ') line++;
+  if (!line)
+    return false;
+  while (*line == '\r' || *line == '\n' || *line == ' ')
+    line++;
   return ((line[0] == 'E' || line[0] == 'W') &&
           (line[1] == ' ' || line[1] == '(')) ||
          strstr(line, "E (") != NULL || strstr(line, "W (") != NULL;
@@ -116,7 +125,7 @@ static size_t ring_read(char *buf, size_t max) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Log hook — called from any task/ISR-safe context by esp_log       */
+/*  Log hook — non-blocking producer; never locks or touches SPIFFS   */
 /* ------------------------------------------------------------------ */
 
 static int log_vprintf_hook(const char *fmt, va_list args) {
@@ -129,56 +138,106 @@ static int log_vprintf_hook(const char *fmt, va_list args) {
   int ret = s_orig_vprintf(fmt, uart_args);
   va_end(uart_args);
 
-  char buf[256];
-  int len = vsnprintf(buf, sizeof(buf), fmt, format_args);
+  /* ESP-IDF's normal logger is expected to run in task context. If a low-level
+     caller reaches this hook from an ISR, preserve UART output but skip the
+     browser/persistent capture path entirely. */
+  if (xPortInIsrContext()) {
+    va_end(format_args);
+    return ret;
+  }
+
+  log_record_t record = {0};
+  int len = vsnprintf(record.text, sizeof(record.text), fmt, format_args);
   va_end(format_args);
 
   if (len > 0) {
-    if ((size_t)len >= sizeof(buf)) {
-      len = sizeof(buf) - 1;
+    if ((size_t)len >= sizeof(record.text)) {
+      len = sizeof(record.text) - 1;
     }
-    if (xSemaphoreTake(s_mutex, 0) == pdTRUE) {
-      ring_write(buf, (size_t)len);
-      if (is_diagnostic_line(buf)) {
-        diag_ring_write(buf, (size_t)len);
-        if (buf[len - 1] != '\n') diag_ring_write("\n", 1);
-      }
-      xSemaphoreGive(s_mutex);
+    record.length = (uint16_t)len;
+    record.diagnostic = is_diagnostic_line(record.text);
+    record.text[len] = '\0';
+
+    BaseType_t queued = pdFALSE;
+    if (s_log_queue) {
+      queued = xQueueSend(s_log_queue, &record, 0);
     }
-    /* If the mutex is held we silently drop — better than blocking a log call.
-     */
+    if (queued != pdTRUE && record.diagnostic) {
+      __atomic_fetch_add(&s_diag_dropped, (uint32_t)record.length,
+                         __ATOMIC_RELAXED);
+    }
   }
   return ret;
 }
 
-static void persistent_log_task(void *arg) {
-  (void)arg;
+static void flush_diagnostic_file(void) {
   char chunk[1024];
-  while (true) {
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    size_t len = 0;
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      len = diag_ring_read(chunk, sizeof(chunk));
-      xSemaphoreGive(s_mutex);
-    }
-    if (!len) continue;
+  size_t len = 0;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    len = diag_ring_read(chunk, sizeof(chunk));
+    xSemaphoreGive(s_mutex);
+  }
+  if (!len) {
+    return;
+  }
 
-    FILE *existing = fopen(DIAG_FILE, "rb");
-    long size = 0;
-    if (existing) {
-      if (fseek(existing, 0, SEEK_END) == 0) size = ftell(existing);
-      fclose(existing);
+  if (xSemaphoreTake(s_file_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    __atomic_fetch_add(&s_diag_dropped, (uint32_t)len, __ATOMIC_RELAXED);
+    return;
+  }
+
+  FILE *existing = fopen(DIAG_FILE, "rb");
+  long size = 0;
+  if (existing) {
+    if (fseek(existing, 0, SEEK_END) == 0) {
+      size = ftell(existing);
     }
-    if (size >= DIAG_FILE_MAX) {
-      remove(DIAG_FILE_OLD);
-      rename(DIAG_FILE, DIAG_FILE_OLD);
+    fclose(existing);
+  }
+  if (size >= DIAG_FILE_MAX) {
+    remove(DIAG_FILE_OLD);
+    rename(DIAG_FILE, DIAG_FILE_OLD);
+  }
+  FILE *file = fopen(DIAG_FILE, "ab");
+  if (file) {
+    fwrite(chunk, 1, len, file);
+    fclose(file);
+  } else {
+    __atomic_fetch_add(&s_diag_dropped, (uint32_t)len, __ATOMIC_RELAXED);
+  }
+  xSemaphoreGive(s_file_mutex);
+}
+
+static void log_worker_task(void *arg) {
+  (void)arg;
+  log_record_t record;
+  TickType_t last_flush = xTaskGetTickCount();
+  const TickType_t flush_interval = pdMS_TO_TICKS(DIAG_FLUSH_INTERVAL_MS);
+
+  while (true) {
+    if (xQueueReceive(s_log_queue, &record, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (record.length >= LOG_RECORD_TEXT_SIZE) {
+        record.length = LOG_RECORD_TEXT_SIZE - 1;
+      }
+      if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        ring_write(record.text, record.length);
+        if (record.diagnostic) {
+          diag_ring_write(record.text, record.length);
+          if (record.length > 0 && record.text[record.length - 1] != '\n') {
+            diag_ring_write("\n", 1);
+          }
+        }
+        xSemaphoreGive(s_mutex);
+      } else if (record.diagnostic) {
+        __atomic_fetch_add(&s_diag_dropped, (uint32_t)record.length,
+                           __ATOMIC_RELAXED);
+      }
     }
-    FILE *file = fopen(DIAG_FILE, "ab");
-    if (file) {
-      fwrite(chunk, 1, len, file);
-      fclose(file);
-    } else {
-      s_diag_dropped += (uint32_t)len;
+
+    TickType_t now = xTaskGetTickCount();
+    if ((now - last_flush) >= flush_interval) {
+      flush_diagnostic_file();
+      last_flush = now;
     }
   }
 }
@@ -197,33 +256,9 @@ static esp_err_t live_log_get(httpd_req_t *req) {
   }
 
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+  httpd_resp_set_hdr(req, "Cache-Control",
+                     "no-store, no-cache, must-revalidate");
   return httpd_resp_send(req, buffer, len);
-}
-
-/* Compatibility endpoint for browsers that cached the old Logs page. It
-   completes the legacy WebSocket handshake so the old JavaScript stops its
-   reconnect loop, but it never streams data. A hard refresh loads the new
-   polling page and no longer uses this endpoint. */
-static esp_err_t legacy_ws_handler(httpd_req_t *req) {
-  if (req->method == HTTP_GET) {
-    return ESP_OK;
-  }
-
-  httpd_ws_frame_t frame = {0};
-  esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
-  if (err != ESP_OK || frame.len == 0) {
-    return err;
-  }
-
-  uint8_t *payload = malloc(frame.len);
-  if (!payload) {
-    return ESP_ERR_NO_MEM;
-  }
-  frame.payload = payload;
-  err = httpd_ws_recv_frame(req, &frame, frame.len);
-  free(payload);
-  return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,15 +266,28 @@ static esp_err_t legacy_ws_handler(httpd_req_t *req) {
 /* ------------------------------------------------------------------ */
 
 esp_err_t log_stream_init(void) {
-  if (TEMP_DISABLE_LOG_STREAM) {
-    ESP_LOGW("log_stream",
-             "DIAGNOSTIC TEST: live/persistent log capture disabled; UART logs "
-             "remain enabled");
+  if (s_initialized) {
     return ESP_OK;
   }
 
   s_mutex = xSemaphoreCreateMutex();
   if (!s_mutex) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  s_file_mutex = xSemaphoreCreateMutex();
+  if (!s_file_mutex) {
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return ESP_ERR_NO_MEM;
+  }
+
+  s_log_queue = xQueueCreate(LOG_QUEUE_LENGTH, sizeof(log_record_t));
+  if (!s_log_queue) {
+    vSemaphoreDelete(s_file_mutex);
+    s_file_mutex = NULL;
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
     return ESP_ERR_NO_MEM;
   }
 
@@ -250,11 +298,30 @@ esp_err_t log_stream_init(void) {
     s_ring = malloc(LOG_RING_SIZE);
   }
   if (!s_ring) {
+    vQueueDelete(s_log_queue);
+    s_log_queue = NULL;
+    vSemaphoreDelete(s_file_mutex);
+    s_file_mutex = NULL;
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
     return ESP_ERR_NO_MEM;
   }
-  s_diag_ring = heap_caps_malloc(DIAG_RING_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!s_diag_ring) s_diag_ring = malloc(DIAG_RING_SIZE);
-  if (!s_diag_ring) return ESP_ERR_NO_MEM;
+  s_diag_ring =
+      heap_caps_malloc(DIAG_RING_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_diag_ring) {
+    s_diag_ring = malloc(DIAG_RING_SIZE);
+  }
+  if (!s_diag_ring) {
+    free(s_ring);
+    s_ring = NULL;
+    vQueueDelete(s_log_queue);
+    s_log_queue = NULL;
+    vSemaphoreDelete(s_file_mutex);
+    s_file_mutex = NULL;
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return ESP_ERR_NO_MEM;
+  }
 
   s_head = s_tail = 0;
   s_diag_head = s_diag_tail = 0;
@@ -262,17 +329,37 @@ esp_err_t log_stream_init(void) {
   /* Hook into esp_log — keep the original so UART output continues. */
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
 
-  task_create_spiram(persistent_log_task, "diag_log", 3072, NULL, 2,
-                     NULL, NULL);
+  BaseType_t task_result =
+      task_create_spiram(log_worker_task, "log_worker", LOG_WORKER_STACK_SIZE,
+                         NULL, 2, NULL, NULL);
+  if (task_result != pdPASS) {
+    esp_log_set_vprintf(s_orig_vprintf);
+    free(s_diag_ring);
+    s_diag_ring = NULL;
+    free(s_ring);
+    s_ring = NULL;
+    vQueueDelete(s_log_queue);
+    s_log_queue = NULL;
+    vSemaphoreDelete(s_file_mutex);
+    s_file_mutex = NULL;
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return ESP_ERR_NO_MEM;
+  }
 
+  s_initialized = true;
+  ESP_LOGI("log_stream",
+           "Safe queued logging active (non-blocking hook, 8192-byte worker)");
   return ESP_OK;
 }
 
 static size_t read_file_into(const char *path, char *buffer, size_t capacity,
                              size_t offset) {
-  if (offset >= capacity) return offset;
+  if (offset >= capacity)
+    return offset;
   FILE *file = fopen(path, "rb");
-  if (!file) return offset;
+  if (!file)
+    return offset;
   offset += fread(buffer + offset, 1, capacity - offset - 1, file);
   fclose(file);
   buffer[offset] = '\0';
@@ -280,28 +367,41 @@ static size_t read_file_into(const char *path, char *buffer, size_t capacity,
 }
 
 size_t log_stream_read_persistent(char *buffer, size_t capacity) {
-  if (!buffer || capacity < 2) return 0;
+  if (!buffer || capacity < 2)
+    return 0;
   buffer[0] = '\0';
+  if (!s_file_mutex ||
+      xSemaphoreTake(s_file_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return 0;
+  }
   size_t offset = read_file_into(DIAG_FILE_OLD, buffer, capacity, 0);
-  return read_file_into(DIAG_FILE, buffer, capacity, offset);
+  offset = read_file_into(DIAG_FILE, buffer, capacity, offset);
+  xSemaphoreGive(s_file_mutex);
+  return offset;
 }
 
 esp_err_t log_stream_clear_persistent(void) {
-  remove(DIAG_FILE);
-  remove(DIAG_FILE_OLD);
+  if (s_file_mutex &&
+      xSemaphoreTake(s_file_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    remove(DIAG_FILE);
+    remove(DIAG_FILE_OLD);
+    xSemaphoreGive(s_file_mutex);
+  }
   if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     s_diag_head = s_diag_tail = 0;
-    s_diag_dropped = 0;
+    __atomic_store_n(&s_diag_dropped, 0, __ATOMIC_RELAXED);
     xSemaphoreGive(s_mutex);
   }
   return ESP_OK;
 }
 
-uint32_t log_stream_persistent_dropped(void) { return s_diag_dropped; }
+uint32_t log_stream_persistent_dropped(void) {
+  return __atomic_load_n(&s_diag_dropped, __ATOMIC_RELAXED);
+}
 
 esp_err_t log_stream_register(httpd_handle_t server) {
-  if (TEMP_DISABLE_LOG_STREAM) {
-    return ESP_OK;
+  if (!server || !s_initialized) {
+    return ESP_ERR_INVALID_STATE;
   }
 
   httpd_uri_t live_uri = {
@@ -316,20 +416,7 @@ esp_err_t log_stream_register(httpd_handle_t server) {
     return err;
   }
 
-  httpd_uri_t legacy_uri = {
-      .uri = "/ws/logs",
-      .method = HTTP_GET,
-      .handler = legacy_ws_handler,
-      .is_websocket = true,
-  };
-  err = httpd_register_uri_handler(server, &legacy_uri);
-  if (err != ESP_OK) {
-    ESP_LOGE("log_stream", "Failed to register legacy /ws/logs: %s",
-             esp_err_to_name(err));
-    return err;
-  }
-
   ESP_LOGI("log_stream",
-           "Log polling available on /api/logs/live (legacy cache guard active)");
+           "Log polling available on /api/logs/live (WebSocket disabled)");
   return ESP_OK;
 }
