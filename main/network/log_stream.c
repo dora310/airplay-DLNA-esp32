@@ -191,6 +191,31 @@ static esp_err_t live_log_get(httpd_req_t *req) {
   return httpd_resp_send(req, buffer, len);
 }
 
+/* Compatibility endpoint for browsers that cached the old Logs page. It
+   completes the legacy WebSocket handshake so the old JavaScript stops its
+   reconnect loop, but it never streams data. A hard refresh loads the new
+   polling page and no longer uses this endpoint. */
+static esp_err_t legacy_ws_handler(httpd_req_t *req) {
+  if (req->method == HTTP_GET) {
+    return ESP_OK;
+  }
+
+  httpd_ws_frame_t frame = {0};
+  esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+  if (err != ESP_OK || frame.len == 0) {
+    return err;
+  }
+
+  uint8_t *payload = malloc(frame.len);
+  if (!payload) {
+    return ESP_ERR_NO_MEM;
+  }
+  frame.payload = payload;
+  err = httpd_ws_recv_frame(req, &frame, frame.len);
+  free(payload);
+  return err;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
@@ -270,6 +295,20 @@ esp_err_t log_stream_register(httpd_handle_t server) {
     return err;
   }
 
-  ESP_LOGI("log_stream", "Log polling available on /api/logs/live");
+  httpd_uri_t legacy_uri = {
+      .uri = "/ws/logs",
+      .method = HTTP_GET,
+      .handler = legacy_ws_handler,
+      .is_websocket = true,
+  };
+  err = httpd_register_uri_handler(server, &legacy_uri);
+  if (err != ESP_OK) {
+    ESP_LOGE("log_stream", "Failed to register legacy /ws/logs: %s",
+             esp_err_to_name(err));
+    return err;
+  }
+
+  ESP_LOGI("log_stream",
+           "Log polling available on /api/logs/live (legacy cache guard active)");
   return ESP_OK;
 }

@@ -88,6 +88,12 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
 }
 
 static esp_err_t logs_page_handler(httpd_req_t *req) {
+  /* Never cache this page: older builds used /ws/logs and cached JavaScript
+     would otherwise retry that retired endpoint indefinitely. */
+  httpd_resp_set_hdr(req, "Cache-Control",
+                     "no-store, no-cache, must-revalidate, max-age=0");
+  httpd_resp_set_hdr(req, "Pragma", "no-cache");
+  httpd_resp_set_hdr(req, "Expires", "0");
   return serve_spiffs_file(req, "/spiffs/www/logs.html", "text/html");
 }
 
