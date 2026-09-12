@@ -327,11 +327,24 @@ void app_main(void) {
   maintenance_mark_services_ready();
   recovery_mark_services_ready();
   if (!recovery_is_safe_mode()) {
+    /*
+     * Temporary AirPlay isolation build:
+     *
+     * The current DLNA renderer advertises UPnP event-subscription URLs but
+     * does not register handlers for the SUBSCRIBE/UNSUBSCRIBE methods. Some
+     * controllers repeatedly retry those requests, producing bursts of HTTP
+     * 405 responses while AirPlay is active. Leave DLNA registration disabled
+     * for this diagnostic build so AirPlay can be tested without that traffic.
+     * Re-enable this block after proper DLNA event handling is implemented.
+     */
+#if 0
     esp_err_t dlna_err =
         dlna_renderer_register(web_server_get_handle(), 80);
     if (dlna_err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
     }
+#endif
+    ESP_LOGI(TAG, "DLNA renderer disabled for AirPlay isolation test");
     if (mqtt_control_start() != ESP_OK) {
       ESP_LOGW(TAG, "MQTT integration did not start");
     }
