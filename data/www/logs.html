@@ -81,8 +81,13 @@ function colorize(text){
   if(autoScroll)anchor.scrollIntoView();
 }
 var polling=false;
+var pollTimer=null;
 async function pollLogs(){
   if(polling)return;
+  if(document.hidden){
+    pollTimer=setTimeout(pollLogs,10000);
+    return;
+  }
   polling=true;
   try{
     var response=await fetch('/api/logs/live',{cache:'no-store'});
@@ -94,8 +99,11 @@ async function pollLogs(){
     dot.classList.remove('ok');
   }finally{
     polling=false;
-    setTimeout(pollLogs,750);
+    pollTimer=setTimeout(pollLogs,2500);
   }
 }
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden){clearTimeout(pollTimer);pollLogs();}
+});
 pollLogs();
 </script></body></html>
