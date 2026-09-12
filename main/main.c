@@ -40,14 +40,13 @@
 static const char *TAG = "main";
 
 /*
- * Temporary diagnostic switch.
+ * DLNA/SSDP service switch.
  *
- * Keep the DLNA implementation compiled so this test is easy to reverse, but
- * do not register its HTTP handlers or start the dlna_ssdp task.  AirPlay,
- * Wi-Fi, the web control panel, MQTT and the PCM5102A output are unchanged.
- * Change this to 0 after the stability test to enable DLNA again.
+ * The isolation test confirmed that DLNA was not responsible for the restart,
+ * so its HTTP handlers and SSDP task are enabled again. The separate
+ * live/persistent diagnostic logging subsystem remains disabled.
  */
-#define TEMP_DISABLE_DLNA 1
+#define TEMP_DISABLE_DLNA 0
 
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
