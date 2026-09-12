@@ -388,6 +388,23 @@ static void signal_old_client_stop(int old_slot) {
   // Task will clean itself up
 }
 
+/* The audio receiver, decoder, PTP clock and event port are process-wide
+ * resources. A replacement client must not start SETUP while the previous
+ * client is still destroying those resources in its cleanup path. Starting
+ * both tasks concurrently caused a use-after-free panic during rapid iOS
+ * TEARDOWN/reconnect negotiation. */
+static bool wait_for_client_cleanup(int slot_idx, uint32_t timeout_ms) {
+  TickType_t started = xTaskGetTickCount();
+  TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+  while (clients[slot_idx].task != NULL) {
+    if ((xTaskGetTickCount() - started) >= timeout) {
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  return true;
+}
+
 static void server_task(void *pvParameters) {
   (void)pvParameters;
 
@@ -474,8 +491,22 @@ static void server_task(void *pvParameters) {
         continue;
       }
     }
-    // Signal old client to stop (in background)
-    signal_old_client_stop(current_slot);
+    /* Stop and JOIN the current client before starting its replacement.
+       The previous background cleanup raced the new client's SETUP against
+       audio_receiver_stop(), decoder destruction and event-port shutdown. */
+    if (clients[current_slot].task != NULL) {
+      int old_slot = current_slot;
+      signal_old_client_stop(old_slot);
+      if (!wait_for_client_cleanup(old_slot, 4000)) {
+        ESP_LOGE(TAG,
+                 "Old client slot %d did not finish cleanup; rejecting "
+                 "replacement safely",
+                 old_slot);
+        close(new_socket);
+        continue;
+      }
+      ESP_LOGI(TAG, "Old client cleanup complete; starting replacement");
+    }
 
     // Setup new slot
     clients[new_slot].socket = new_socket;

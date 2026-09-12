@@ -313,7 +313,10 @@ void rtsp_stop_event_port_task(void) {
     shutdown(event_listen_socket, SHUT_RDWR);
   }
 
-  if (!event_port_wait_for_task_stopped(20)) {
+  /* event_port_task can be inside a one-second select(). Give it two full
+     select intervals; the previous one-second deadline expired at the same
+     instant as select and allowed reconnect cleanup to overlap. */
+  if (!event_port_wait_for_task_stopped(50)) {
     ESP_LOGW(TAG, "Event port task did not exit within timeout");
   }
 }
