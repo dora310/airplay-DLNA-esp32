@@ -881,6 +881,43 @@ static esp_err_t dlna_post_handler(httpd_req_t *req) {
                              "DLNA endpoint not found");
 }
 
+/* The UPnP eventSubURL endpoints use SUBSCRIBE (HTTP method 26) and
+ * UNSUBSCRIBE (method 27). Registering only GET/POST made controllers retry
+ * continuously after every 405 response. */
+static esp_err_t dlna_event_handler(httpd_req_t *req) {
+  if (strncmp(req->uri, "/dlna/event/", strlen("/dlna/event/")) != 0) {
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                               "DLNA event endpoint not found");
+  }
+
+  httpd_resp_set_hdr(req, "Server", DLNA_SERVER_NAME);
+  httpd_resp_set_hdr(req, "Connection", "close");
+
+  if (req->method == HTTP_SUBSCRIBE) {
+    char sid[96] = {0};
+    size_t sid_len = httpd_req_get_hdr_value_len(req, "SID");
+    if (sid_len > 0 && sid_len < sizeof(sid) &&
+        httpd_req_get_hdr_value_str(req, "SID", sid, sizeof(sid)) != ESP_OK) {
+      sid[0] = '\0';
+    }
+    if (sid[0] == '\0') {
+      strlcpy(sid, s_udn, sizeof(sid));
+    }
+    httpd_resp_set_hdr(req, "SID", sid);
+    httpd_resp_set_hdr(req, "TIMEOUT", "Second-1800");
+    httpd_resp_set_status(req, "200 OK");
+    return httpd_resp_send(req, NULL, 0);
+  }
+
+  if (req->method == HTTP_UNSUBSCRIBE) {
+    httpd_resp_set_status(req, "200 OK");
+    return httpd_resp_send(req, NULL, 0);
+  }
+
+  return httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED,
+                             "Unsupported DLNA event method");
+}
+
 /* SSDP uses comparatively large UDP and HTTP-style text buffers. Keeping
  * these buffers on the FreeRTOS task stack caused an immediate stack overflow
  * during the first ssdp:alive announcement. Prefer PSRAM and fall back to the
@@ -1058,10 +1095,20 @@ esp_err_t dlna_renderer_register(httpd_handle_t server, uint16_t server_port) {
         .uri = "/dlna/*", .method = HTTP_GET, .handler = dlna_get_handler};
     const httpd_uri_t post_uri = {
         .uri = "/dlna/*", .method = HTTP_POST, .handler = dlna_post_handler};
+    const httpd_uri_t subscribe_uri = {.uri = "/dlna/event/*",
+                                       .method = HTTP_SUBSCRIBE,
+                                       .handler = dlna_event_handler};
+    const httpd_uri_t unsubscribe_uri = {.uri = "/dlna/event/*",
+                                         .method = HTTP_UNSUBSCRIBE,
+                                         .handler = dlna_event_handler};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &get_uri), TAG,
                         "register DLNA GET failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &post_uri), TAG,
                         "register DLNA POST failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &subscribe_uri), TAG,
+                        "register DLNA SUBSCRIBE failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &unsubscribe_uri),
+                        TAG, "register DLNA UNSUBSCRIBE failed");
     s_handlers_registered = true;
   }
 

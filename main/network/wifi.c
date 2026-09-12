@@ -174,7 +174,10 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     wifi_event_sta_disconnected_t *disconnected =
         (wifi_event_sta_disconnected_t *)event_data;
     s_last_disconnect_reason = disconnected->reason;
-    ESP_LOGI(TAG, "Disconnected from AP, reason: %d", disconnected->reason);
+    /* Persist the real 802.11 disconnect reason. HTTP socket resets are not
+       Wi-Fi link disconnects and must not be confused with this event. */
+    ESP_LOGW(TAG, "WiFi link disconnected: reason=%d, count=%lu",
+             disconnected->reason, (unsigned long)s_disconnect_count);
 
     s_retry_num++;
 
@@ -311,6 +314,9 @@ static void wifi_select_best_ap(const char *ssid) {
     sta_cfg.sta.bssid_set = false;
     memset(sta_cfg.sta.bssid, 0, sizeof(sta_cfg.sta.bssid));
     sta_cfg.sta.channel = 0;
+    sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    sta_cfg.sta.failure_retry_cnt = 3;
     esp_err_t config_err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (config_err != ESP_OK) {
       ESP_LOGW(TAG, "Could not enable automatic AP selection: %s",
@@ -404,6 +410,15 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   sta_config.sta.threshold.authmode =
       s_has_credentials && strlen(password) > 0 ? WIFI_AUTH_WPA2_PSK
                                                 : WIFI_AUTH_OPEN;
+  /* Choose the strongest matching mesh/extender node instead of accepting
+     the first scan match, and retry it after a temporary WPA3 refusal. */
+  sta_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  sta_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+  sta_config.sta.failure_retry_cnt = 3;
+  sta_config.sta.bssid_set = false;
+  sta_config.sta.channel = 0;
+  sta_config.sta.pmf_cfg.capable = true;
+  sta_config.sta.pmf_cfg.required = false;
 
   // Configure AP and save for later re-enable
   const char *default_ssid = ap_ssid ? ap_ssid : CONFIG_DEFAULT_AP_SSID;

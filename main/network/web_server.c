@@ -821,7 +821,7 @@ esp_err_t web_server_start(uint16_t port) {
      be reclaimed without terminating a long-lived WebSocket. */
   config.lru_purge_enable = true;
   config.max_uri_handlers =
-      64; // Captive portal + v3.3 reliability API + EQ + speedtest + DLNA
+      68; // Captive portal + reliability API + EQ + DLNA event verbs
   config.max_resp_headers = 8;
   config.stack_size = 8192;
   config.uri_match_fn = httpd_uri_match_wildcard;
