@@ -97,12 +97,18 @@ static void start_airplay_services(void) {
 
   audio_output_start();
 
-  ESP_ERROR_CHECK(rtsp_server_start());
+  esp_err_t rtsp_err = rtsp_server_start();
+  if (rtsp_err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not start RTSP after network recovery: %s",
+             esp_err_to_name(rtsp_err));
+    audio_output_stop();
+    s_airplay_started = false;
+    return;
+  }
 
   s_airplay_started = true;
   ESP_LOGI(TAG, "AirPlay ready");
 }
-#ifdef CONFIG_BT_A2DP_ENABLE
 static void stop_airplay_services(void) {
   if (!s_airplay_started) {
     return;
@@ -117,7 +123,6 @@ static void stop_airplay_services(void) {
   playback_control_set_source(PLAYBACK_SOURCE_NONE);
   ESP_LOGI(TAG, "AirPlay stopped");
 }
-#endif
 
 static void network_monitor_task(void *pvParameters) {
   (void)pvParameters;
@@ -125,6 +130,7 @@ static void network_monitor_task(void *pvParameters) {
   bool dns_running = !had_network;
   bool wifi_started = wifi_is_connected() || !ethernet_is_connected();
   bool had_eth = ethernet_is_connected();
+  uint32_t last_wifi_disconnect_count = wifi_disconnect_count();
 
   // Start captive portal DNS if no network yet
   if (dns_running) {
@@ -154,24 +160,42 @@ static void network_monitor_task(void *pvParameters) {
     }
 
     had_eth = eth_up;
-    has_network = eth_up || wifi_is_connected();
+    wifi_up = wifi_is_connected();
+    has_network = eth_up || wifi_up;
 
-    if (has_network == had_network) {
-      continue;
-    }
+    uint32_t disconnect_count = wifi_disconnect_count();
+    bool wifi_link_bounced = !eth_up && wifi_up &&
+                             disconnect_count != last_wifi_disconnect_count;
+    last_wifi_disconnect_count = disconnect_count;
 
-    if (has_network) {
-      ESP_LOGI(TAG, "Network up (eth=%s, wifi=%s)", eth_up ? "yes" : "no",
-               wifi_up ? "yes" : "no");
-      start_airplay_services();
-      if (dns_running) {
-        dns_server_stop();
-        dns_running = false;
+    if (!has_network) {
+      if (had_network) {
+        ESP_LOGW(TAG, "Network lost; stopping AirPlay sockets");
       }
-    } else {
+      stop_airplay_services();
       if (!dns_running) {
         dns_server_start(WIFI_PROVISIONING_IP_ADDR);
         dns_running = true;
+      }
+    } else {
+      if (!had_network) {
+        ESP_LOGI(TAG, "Network restored (eth=%s, wifi=%s)",
+                 eth_up ? "yes" : "no", wifi_up ? "yes" : "no");
+      }
+
+      /* A brief Wi-Fi outage may begin and end inside one 2-second monitor
+         interval. The IP state looks continuously up, but every RTSP socket
+         from the old association is invalid and must be rebuilt. */
+      if (wifi_link_bounced && s_airplay_started) {
+        ESP_LOGW(TAG, "WiFi link changed; restarting AirPlay sockets");
+        stop_airplay_services();
+      }
+      if (!s_airplay_started) {
+        start_airplay_services();
+      }
+      if (dns_running) {
+        dns_server_stop();
+        dns_running = false;
       }
     }
 
@@ -223,9 +247,7 @@ static void on_airplay_client_event(rtsp_event_t event,
 #endif
 
 void app_main(void) {
-  /* Unique marker for the AirPlay connection-stability replacement build.
-   * Check the USB serial log for this exact line after flashing. */
-  ESP_LOGI(TAG, "AIRPLAY-STABILITY-R1: amended firmware is running");
+  ESP_LOGI(TAG, "NETWORK-RECOVERY-R6: amended firmware is running");
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
@@ -331,24 +353,11 @@ void app_main(void) {
   maintenance_mark_services_ready();
   recovery_mark_services_ready();
   if (!recovery_is_safe_mode()) {
-    /*
-     * Temporary AirPlay isolation build:
-     *
-     * The current DLNA renderer advertises UPnP event-subscription URLs but
-     * does not register handlers for the SUBSCRIBE/UNSUBSCRIBE methods. Some
-     * controllers repeatedly retry those requests, producing bursts of HTTP
-     * 405 responses while AirPlay is active. Leave DLNA registration disabled
-     * for this diagnostic build so AirPlay can be tested without that traffic.
-     * Re-enable this block after proper DLNA event handling is implemented.
-     */
-#if 0
     esp_err_t dlna_err =
         dlna_renderer_register(web_server_get_handle(), 80);
     if (dlna_err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
     }
-#endif
-    ESP_LOGI(TAG, "DLNA renderer disabled for AirPlay isolation test");
     if (mqtt_control_start() != ESP_OK) {
       ESP_LOGW(TAG, "MQTT integration did not start");
     }
