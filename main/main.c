@@ -39,6 +39,16 @@
 
 static const char *TAG = "main";
 
+/*
+ * Temporary diagnostic switch.
+ *
+ * Keep the DLNA implementation compiled so this test is easy to reverse, but
+ * do not register its HTTP handlers or start the dlna_ssdp task.  AirPlay,
+ * Wi-Fi, the web control panel, MQTT and the PCM5102A output are unchanged.
+ * Change this to 0 after the stability test to enable DLNA again.
+ */
+#define TEMP_DISABLE_DLNA 1
+
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
 
@@ -365,11 +375,16 @@ void app_main(void) {
   maintenance_mark_services_ready();
   recovery_mark_services_ready();
   if (!recovery_is_safe_mode()) {
+#if TEMP_DISABLE_DLNA
+    ESP_LOGW(TAG,
+             "DIAGNOSTIC TEST: DLNA/SSDP disabled; AirPlay remains enabled");
+#else
     esp_err_t dlna_err =
         dlna_renderer_register(web_server_get_handle(), 80);
     if (dlna_err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to register DLNA: %s", esp_err_to_name(dlna_err));
     }
+#endif
     if (mqtt_control_start() != ESP_OK) {
       ESP_LOGW(TAG, "MQTT integration did not start");
     }
