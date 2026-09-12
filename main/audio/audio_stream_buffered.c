@@ -20,8 +20,10 @@
 
 static const char *TAG = "audio_buf";
 
-// Read exact number of bytes, but keep waiting on timeout if paused
-// Returns: positive = bytes read, 0 = connection closed, -1 = error
+// Read exactly the requested number of bytes. A receive timeout is not a
+// disconnected AirPlay client: buffered AirPlay can legitimately stop
+// transmitting temporarily while already-buffered audio continues playing.
+// Returns: positive = bytes read, 0 = connection closed, -1 = real error.
 static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
@@ -29,26 +31,22 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
       total += (size_t)n;
+      continue;
     } else if (n == 0) {
       // Connection closed by peer
       ESP_LOGI(TAG, "Buffered audio connection closed by peer");
       return 0;
-    } else {
-      // n < 0: error or timeout
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Timeout - if we're paused, keep waiting for resume
-        if (!state->timing.playing) {
-          // Still paused, keep the connection alive
-          vTaskDelay(pdMS_TO_TICKS(100));
-          continue;
-        }
-        // Playing but timed out - connection may be dead
-        ESP_LOGW(TAG, "Buffered audio timeout while playing");
-        return -1;
-      }
-      ESP_LOGE(TAG, "Buffered audio recv error: %d", errno);
-      return -1;
     }
+
+    // A socket timeout is temporary and must not close the AirPlay stream.
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      vTaskDelay(pdMS_TO_TICKS(state->timing.playing ? 10 : 100));
+      continue;
+    }
+
+    // Any other errno is a genuine socket failure.
+    ESP_LOGE(TAG, "Buffered audio recv error: %d", errno);
+    return -1;
   }
   return stream->running ? (ssize_t)total : -1;
 }
