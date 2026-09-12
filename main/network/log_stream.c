@@ -33,6 +33,16 @@
 
 #define LIVE_LOG_CHUNK 2048
 
+/*
+ * Temporary diagnostic switch.
+ *
+ * The log capture hook runs in the context of every task that writes an
+ * ESP-IDF log, and the persistent writer also performs SPIFFS/newlib file I/O.
+ * Disable both pieces during the stability test while preserving ordinary
+ * UART logging and the rest of the web control panel.
+ */
+#define TEMP_DISABLE_LOG_STREAM 1
+
 static char *s_ring;
 static volatile size_t s_head; /* next write position  */
 static volatile size_t s_tail; /* next read position   */
@@ -221,6 +231,13 @@ static esp_err_t legacy_ws_handler(httpd_req_t *req) {
 /* ------------------------------------------------------------------ */
 
 esp_err_t log_stream_init(void) {
+  if (TEMP_DISABLE_LOG_STREAM) {
+    ESP_LOGW("log_stream",
+             "DIAGNOSTIC TEST: live/persistent log capture disabled; UART logs "
+             "remain enabled");
+    return ESP_OK;
+  }
+
   s_mutex = xSemaphoreCreateMutex();
   if (!s_mutex) {
     return ESP_ERR_NO_MEM;
@@ -283,6 +300,10 @@ esp_err_t log_stream_clear_persistent(void) {
 uint32_t log_stream_persistent_dropped(void) { return s_diag_dropped; }
 
 esp_err_t log_stream_register(httpd_handle_t server) {
+  if (TEMP_DISABLE_LOG_STREAM) {
+    return ESP_OK;
+  }
+
   httpd_uri_t live_uri = {
       .uri = "/api/logs/live",
       .method = HTTP_GET,
