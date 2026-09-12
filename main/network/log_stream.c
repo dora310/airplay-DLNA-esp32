@@ -1,9 +1,9 @@
 /**
- * WebSocket-based log streaming over HTTP.
+ * Polling-based log streaming over HTTP.
  *
  * Intercepts ESP-IDF log output via esp_log_set_vprintf(), stores lines
- * in a ring buffer, and broadcasts them to any connected WebSocket
- * client on /ws/logs.  UART output is preserved.
+ * in a ring buffer. The browser periodically drains new lines through
+ * /api/logs/live. UART output is preserved.
  */
 
 #include "log_stream.h"
@@ -31,10 +31,7 @@
 #define DIAG_FILE_OLD "/spiffs/diagnostics.old.log"
 #define DIAG_FILE_MAX 12288
 
-#define MAX_WS_CLIENTS        3
-#define BROADCAST_TASK_STACK  4096
-#define BROADCAST_INTERVAL_MS 100
-#define MAX_SEND_CHUNK        1024
+#define LIVE_LOG_CHUNK 2048
 
 static char *s_ring;
 static volatile size_t s_head; /* next write position  */
@@ -44,11 +41,6 @@ static char *s_diag_ring;
 static volatile size_t s_diag_head;
 static volatile size_t s_diag_tail;
 static volatile uint32_t s_diag_dropped;
-
-static httpd_handle_t s_server;
-static int s_clients[MAX_WS_CLIENTS];
-static int s_client_count;
-static SemaphoreHandle_t s_client_mutex;
 
 static vprintf_like_t s_orig_vprintf;
 
@@ -182,179 +174,21 @@ static void persistent_log_task(void *arg) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  WebSocket handler                                                  */
+/*  Short HTTP polling handler                                         */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t ws_log_handler(httpd_req_t *req) {
-  if (req->method == HTTP_GET) {
-    /* Handshake — register this socket. */
-    int fd = httpd_req_to_sockfd(req);
-    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      bool already_registered = false;
-      for (int i = 0; i < s_client_count; i++) {
-        if (s_clients[i] == fd) {
-          already_registered = true;
-          break;
-        }
-      }
+static esp_err_t live_log_get(httpd_req_t *req) {
+  char buffer[LIVE_LOG_CHUNK];
 
-      if (already_registered) {
-        xSemaphoreGive(s_client_mutex);
-        return ESP_OK;
-      } else if (s_client_count < MAX_WS_CLIENTS) {
-        s_clients[s_client_count++] = fd;
-        int total = s_client_count;
-        xSemaphoreGive(s_client_mutex);
-        ESP_LOGI("log_stream", "WebSocket client connected (fd=%d, total=%d)",
-                 fd, total);
-      } else {
-        xSemaphoreGive(s_client_mutex);
-        ESP_LOGW("log_stream", "Max WebSocket clients reached, rejecting fd=%d",
-                 fd);
-        return ESP_FAIL;
-      }
-    } else {
-      ESP_LOGW("log_stream", "Client mutex timeout, rejecting fd=%d", fd);
-      return ESP_FAIL;
-    }
-    return ESP_OK;
+  size_t len = 0;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    len = ring_read(buffer, LIVE_LOG_CHUNK);
+    xSemaphoreGive(s_mutex);
   }
 
-  /* Consume complete control frames. Reading only the frame header leaves a
-     CLOSE/PONG payload queued in the HTTP server and can make the fd stale. */
-  int fd = httpd_req_to_sockfd(req);
-  httpd_ws_frame_t frame = {0};
-  esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  uint8_t *payload = NULL;
-  if (frame.len > 0) {
-    payload = malloc(frame.len + 1);
-    if (!payload) {
-      return ESP_ERR_NO_MEM;
-    }
-    frame.payload = payload;
-    err = httpd_ws_recv_frame(req, &frame, frame.len);
-    if (err != ESP_OK) {
-      free(payload);
-      return err;
-    }
-    payload[frame.len] = '\0';
-  }
-
-  if (frame.type == HTTPD_WS_TYPE_PING) {
-    httpd_ws_frame_t pong = {
-        .type = HTTPD_WS_TYPE_PONG,
-        .payload = frame.payload,
-        .len = frame.len,
-    };
-    err = httpd_ws_send_frame(req, &pong);
-  } else if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      for (int i = s_client_count - 1; i >= 0; i--) {
-        if (s_clients[i] == fd) {
-          if (i < s_client_count - 1) {
-            s_clients[i] = s_clients[s_client_count - 1];
-          }
-          s_client_count--;
-          break;
-        }
-      }
-      xSemaphoreGive(s_client_mutex);
-    }
-  }
-
-  free(payload);
-  return err;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Broadcast task                                                     */
-/* ------------------------------------------------------------------ */
-
-static void remove_client(int index) {
-  if (index < s_client_count - 1) {
-    s_clients[index] = s_clients[s_client_count - 1];
-  }
-  s_client_count--;
-}
-
-typedef struct {
-  size_t len;
-  uint8_t payload[];
-} ws_broadcast_job_t;
-
-/* Runs in the HTTP server task. ESP-IDF requires asynchronous WebSocket sends
-   to be queued into this context; sending directly from the log task can race
-   request/control-frame processing and corrupt the WebSocket framing. */
-static void broadcast_work(void *arg) {
-  ws_broadcast_job_t *job = (ws_broadcast_job_t *)arg;
-  if (!job) {
-    return;
-  }
-
-  httpd_ws_frame_t frame = {
-      .type = HTTPD_WS_TYPE_TEXT,
-      .payload = job->payload,
-      .len = job->len,
-  };
-
-  if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    for (int i = s_client_count - 1; i >= 0; i--) {
-      int fd = s_clients[i];
-      if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-        remove_client(i);
-        continue;
-      }
-
-      esp_err_t err = httpd_ws_send_frame_async(s_server, fd, &frame);
-      if (err != ESP_OK) {
-        /* Closing a browser tab is normal and unrelated to AirPlay. */
-        ESP_LOGD("log_stream", "Removing WebSocket client fd=%d: %s", fd,
-                 esp_err_to_name(err));
-        remove_client(i);
-      }
-    }
-    xSemaphoreGive(s_client_mutex);
-  }
-
-  free(job);
-}
-
-static void broadcast_task(void *arg) {
-  (void)arg;
-  char buf[MAX_SEND_CHUNK];
-
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(BROADCAST_INTERVAL_MS));
-
-    if (s_client_count == 0) {
-      continue;
-    }
-
-    size_t len = 0;
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      len = ring_read(buf, sizeof(buf));
-      xSemaphoreGive(s_mutex);
-    }
-    if (len == 0) {
-      continue;
-    }
-
-    ws_broadcast_job_t *job = malloc(sizeof(*job) + len);
-    if (!job) {
-      continue;
-    }
-    job->len = len;
-    memcpy(job->payload, buf, len);
-
-    esp_err_t err = httpd_queue_work(s_server, broadcast_work, job);
-    if (err != ESP_OK) {
-      free(job);
-    }
-  }
+  httpd_resp_set_type(req, "text/plain; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+  return httpd_resp_send(req, buffer, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -382,12 +216,6 @@ esp_err_t log_stream_init(void) {
 
   s_head = s_tail = 0;
   s_diag_head = s_diag_tail = 0;
-  s_client_count = 0;
-
-  s_client_mutex = xSemaphoreCreateMutex();
-  if (!s_client_mutex) {
-    return ESP_ERR_NO_MEM;
-  }
 
   /* Hook into esp_log — keep the original so UART output continues. */
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
@@ -430,23 +258,18 @@ esp_err_t log_stream_clear_persistent(void) {
 uint32_t log_stream_persistent_dropped(void) { return s_diag_dropped; }
 
 esp_err_t log_stream_register(httpd_handle_t server) {
-  s_server = server;
-
-  httpd_uri_t ws_uri = {
-      .uri = "/ws/logs",
+  httpd_uri_t live_uri = {
+      .uri = "/api/logs/live",
       .method = HTTP_GET,
-      .handler = ws_log_handler,
-      .is_websocket = true,
+      .handler = live_log_get,
   };
-  esp_err_t err = httpd_register_uri_handler(server, &ws_uri);
+  esp_err_t err = httpd_register_uri_handler(server, &live_uri);
   if (err != ESP_OK) {
-    ESP_LOGE("log_stream", "Failed to register /ws/logs: %s",
+    ESP_LOGE("log_stream", "Failed to register /api/logs/live: %s",
              esp_err_to_name(err));
     return err;
   }
 
-  task_create_spiram(broadcast_task, "log_ws", BROADCAST_TASK_STACK, NULL, 3,
-                     NULL, NULL);
-  ESP_LOGI("log_stream", "Log streaming on /ws/logs");
+  ESP_LOGI("log_stream", "Log polling available on /api/logs/live");
   return ESP_OK;
 }

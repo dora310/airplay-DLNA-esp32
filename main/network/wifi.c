@@ -34,9 +34,9 @@ static esp_netif_t *s_ap_netif = NULL;
 static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
 static bool s_has_credentials = false;
-static bool s_bssid_set = false;
 static bool s_pending_credential_test = false;
 static uint8_t s_last_disconnect_reason = 0;
+static volatile uint32_t s_disconnect_count = 0;
 static esp_timer_handle_t s_retry_timer = NULL;
 static SemaphoreHandle_t s_scan_mutex = NULL;
 
@@ -169,26 +169,14 @@ static void event_handler(void *arg, esp_event_base_t event_base,
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_sta_connected = false;
+    s_disconnect_count++;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     wifi_event_sta_disconnected_t *disconnected =
         (wifi_event_sta_disconnected_t *)event_data;
     s_last_disconnect_reason = disconnected->reason;
     ESP_LOGI(TAG, "Disconnected from AP, reason: %d", disconnected->reason);
 
     s_retry_num++;
-
-    /* A BSSID selected at boot may disappear when a mesh/AP roams. Unpin it
-       after repeated failures so ESP-IDF can associate with another AP that
-       has the same SSID. */
-    if (s_bssid_set && s_retry_num == 3) {
-      wifi_config_t cfg;
-      if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK) {
-        cfg.sta.bssid_set = false;
-        memset(cfg.sta.bssid, 0, sizeof(cfg.sta.bssid));
-        esp_wifi_set_config(WIFI_IF_STA, &cfg);
-        s_bssid_set = false;
-        ESP_LOGW(TAG, "Released stale BSSID lock; roaming is now allowed");
-      }
-    }
 
     if (s_retry_num < AP_REENABLE_THRESHOLD) {
       // Fast retries — reconnect immediately
@@ -218,6 +206,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     s_retry_num = 0;
     s_sta_connected = true;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
     if (s_pending_credential_test) {
       esp_err_t promote = settings_promote_pending_wifi_credentials();
       if (promote == ESP_OK) {
@@ -260,7 +249,7 @@ static void scan_and_connect_task(void *arg) {
   vTaskDelete(NULL);
 }
 
-// Scan for the best AP matching our SSID and set its BSSID in the STA config
+// Scan matching APs for diagnostics, then let ESP-IDF select/roam dynamically.
 static void wifi_select_best_ap(const char *ssid) {
   wifi_scan_config_t scan_config = {
       .ssid = (uint8_t *)ssid,
@@ -313,27 +302,21 @@ static void wifi_select_best_ap(const char *ssid) {
     }
   }
 
-  /*
-   * Do not lock the station to one BSSID. Mesh systems such as Eero expose
-   * several access points under the same SSID, and pinning the ESP32 to the
-   * BSSID selected during the startup scan can cause repeated disconnects
-   * when the mesh changes the preferred node. Keep the scan above for useful
-   * diagnostics, but let ESP-IDF select and roam between matching APs.
-   */
+  /* Do not lock to the BSSID found during the startup scan. Mesh networks can
+     move a client between nodes under one SSID; a pinned BSSID then prevents
+     recovery. Clear both the BSSID and channel so the Wi-Fi driver can select
+     any matching access point. */
   wifi_config_t sta_cfg;
   if (esp_wifi_get_config(WIFI_IF_STA, &sta_cfg) == ESP_OK) {
     sta_cfg.sta.bssid_set = false;
     memset(sta_cfg.sta.bssid, 0, sizeof(sta_cfg.sta.bssid));
     sta_cfg.sta.channel = 0;
-
     esp_err_t config_err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (config_err != ESP_OK) {
       ESP_LOGW(TAG, "Could not enable automatic AP selection: %s",
                esp_err_to_name(config_err));
     }
   }
-  s_bssid_set = false;
-
   free(ap_list);
 }
 
@@ -488,6 +471,8 @@ void wifi_get_mac_str(char *mac_str, size_t len) {
 bool wifi_is_connected(void) {
   return s_sta_connected;
 }
+
+uint32_t wifi_disconnect_count(void) { return s_disconnect_count; }
 
 esp_err_t wifi_get_ip_str(char *ip_str, size_t len) {
   if (!s_sta_netif || !ip_str || len == 0) {

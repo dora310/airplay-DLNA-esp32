@@ -6,13 +6,11 @@
 #include <stdint.h>
 
 /**
- * WebSocket-based log streaming.
+ * Polling-based live log transport.
  *
  * Hooks into esp_log via esp_log_set_vprintf() to capture all log output
- * into a ring buffer. Connected WebSocket clients on /ws/logs receive
- * log lines in real-time. Logs continue to go to UART as normal.
- *
- * Requires CONFIG_HTTPD_WS_SUPPORT=y in sdkconfig.
+ * into a ring buffer. The Logs page periodically drains new lines from
+ * /api/logs/live. Logs continue to go to UART as normal.
  */
 
 /**
@@ -22,8 +20,7 @@
 esp_err_t log_stream_init(void);
 
 /**
- * Register the /ws/logs WebSocket handler on the given HTTP server
- * and start the broadcast task.
+ * Register the /api/logs/live polling handler on the HTTP server.
  */
 esp_err_t log_stream_register(httpd_handle_t server);
 

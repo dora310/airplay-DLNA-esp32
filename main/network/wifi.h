@@ -36,6 +36,13 @@ void wifi_get_mac_str(char *mac_str, size_t len);
 bool wifi_is_connected(void);
 
 /**
+ * Monotonic count of station disconnect events since boot.
+ * Used by the service supervisor to detect short link interruptions even when
+ * Wi-Fi has already reconnected before its next polling interval.
+ */
+uint32_t wifi_disconnect_count(void);
+
+/**
  * Get current IP address as string
  * @param ip_str Output buffer
  * @param len Buffer size
