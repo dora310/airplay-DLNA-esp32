@@ -25,14 +25,14 @@ static const char *TAG = "mdns_airplay";
 // Flags: 0x4 = audio receiver
 #define AIRPLAY_FLAGS "0x4"
 
-// Metadata types advertised in the "md" txt record:
-//   0 = artwork (cover art images), 1 = progress, 2 = text (track info).
-// When artwork is disabled, drop "0" so senders do not transmit cover art,
-// which can stall the audio pipeline and cause drop-outs on realtime streams.
+// Metadata types advertised in the "md" TXT record:
+//   0 = text (title/artist/album), 1 = artwork, 2 = progress.
+// Keep type 0 enabled even when artwork is disabled, otherwise Apple Music
+// sends timing updates but omits the text metadata needed by the display.
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
 #define AIRPLAY_METADATA_TYPES "0,1,2"
 #else
-#define AIRPLAY_METADATA_TYPES "1,2"
+#define AIRPLAY_METADATA_TYPES "0,2"
 #endif
 
 // Model identifier - AudioAccessory for speaker appearance
