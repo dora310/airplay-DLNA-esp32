@@ -83,6 +83,12 @@ void dacp_send_volume(float volume_percent);
 bool dacp_is_active(void);
 
 /**
+ * Check whether the matching _dacp._tcp service has actually been discovered.
+ * A session header alone is not enough to deliver a remote-control command.
+ */
+bool dacp_can_control(void);
+
+/**
  * Probe mDNS to check if the client's DACP service is still advertised.
  * Used in AirPlay v1 mode to differentiate pause from genuine disconnect.
  * @return true if the _dacp._tcp service matching the current session is found

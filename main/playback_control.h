@@ -42,7 +42,7 @@ playback_source_t playback_control_get_source(void);
 /**
  * Toggle play/pause.
  */
-void playback_control_play_pause(void);
+esp_err_t playback_control_play_pause(void);
 
 /**
  * Increase volume by one step (~3 dB).
@@ -57,17 +57,17 @@ void playback_control_volume_down(void);
 /**
  * Skip to next track.
  */
-void playback_control_next(void);
+esp_err_t playback_control_next(void);
 
 /**
  * Skip to previous track.
  */
-void playback_control_prev(void);
+esp_err_t playback_control_prev(void);
 
 /**
  * Toggle mute/unmute (AirPlay only — mirrors local mute logic from play/pause).
  */
-void playback_control_toggle_mute(void);
+esp_err_t playback_control_toggle_mute(void);
 
 /**
  * Check if currently muted.

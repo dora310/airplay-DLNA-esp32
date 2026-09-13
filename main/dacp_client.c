@@ -60,8 +60,9 @@ static void discover_dacp_port(void) {
   char dacp_id_local[DACP_ID_MAX];
 
   xSemaphoreTake(s_mutex, portMAX_DELAY);
-  // Skip if port is already known or discovery already failed
-  if (s_dacp_port != 0 || s_discovery_failed) {
+  // Skip only when the port is already known. A failed discovery is not
+  // permanent: iOS may publish _dacp._tcp after the RTSP session begins.
+  if (s_dacp_port != 0) {
     xSemaphoreGive(s_mutex);
     return;
   }
@@ -147,11 +148,22 @@ static void execute_dacp_request(const char *path) {
 
   xSemaphoreGive(s_mutex);
 
-  // If port not yet discovered, skip — the eager discovery task will
-  // populate it. Never block the worker on mDNS.
+  // If eager discovery ran before iOS published its DACP service, retry now.
+  // This runs only in the low-priority DACP worker and never in the web/audio
+  // task. Commands are no longer silently discarded merely because the first
+  // lookup was too early.
   if (port_copy == 0) {
-    ESP_LOGD(TAG, "DACP: port not ready, skipping '%s'", path);
-    return;
+    discover_dacp_port();
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    port_copy = s_dacp_port;
+    client_ip_copy = s_client_ip;
+    strlcpy(active_remote_copy, s_active_remote,
+            sizeof(active_remote_copy));
+    xSemaphoreGive(s_mutex);
+    if (port_copy == 0) {
+      ESP_LOGW(TAG, "DACP unavailable; cannot send '%s'", path);
+      return;
+    }
   }
 
   // Build URL: http://<ip>:<port>/ctrl-int/1/<path>
@@ -337,6 +349,25 @@ bool dacp_is_active(void) {
     xSemaphoreGive(s_mutex);
   }
   return active;
+}
+
+bool dacp_can_control(void) {
+  if (!s_initialized) {
+    return false;
+  }
+  bool ready = false;
+  bool retry_discovery = false;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    ready = s_session_valid && s_dacp_port != 0 &&
+            s_active_remote[0] != '\0';
+    retry_discovery = s_session_valid && s_dacp_port == 0;
+    xSemaphoreGive(s_mutex);
+  }
+  if (retry_discovery && s_cmd_queue) {
+    char sentinel[CMD_PATH_MAX] = {CMD_DISCOVER[0]};
+    xQueueSendToFront(s_cmd_queue, sentinel, 0);
+  }
+  return ready;
 }
 
 bool dacp_probe_service(void) {
