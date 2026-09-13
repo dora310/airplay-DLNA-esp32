@@ -25,6 +25,9 @@ static EventGroupHandle_t s_wifi_event_group;
 
 // Re-enable AP after this many consecutive failures
 #define AP_REENABLE_THRESHOLD 5
+// Keep the provisioning network visible long enough for a phone to discover
+// and join it, even when the station reconnects to saved Wi-Fi quickly.
+#define SETUP_AP_GRACE_SECONDS 120
 // lwIP DHCP hostnames are limited to 31 characters plus the trailing NUL.
 #define DHCP_HOSTNAME_MAX_LEN 31
 
@@ -38,6 +41,7 @@ static bool s_pending_credential_test = false;
 static uint8_t s_last_disconnect_reason = 0;
 static volatile uint32_t s_disconnect_count = 0;
 static esp_timer_handle_t s_retry_timer = NULL;
+static esp_timer_handle_t s_ap_shutdown_timer = NULL;
 static SemaphoreHandle_t s_scan_mutex = NULL;
 
 // Saved AP config from init, used to re-enable AP without duplication
@@ -122,6 +126,22 @@ static void retry_timer_callback(void *arg) {
   }
 }
 
+static void ap_shutdown_timer_callback(void *arg) {
+  (void)arg;
+  if (!s_sta_connected) {
+    return;
+  }
+
+  wifi_mode_t mode;
+  if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_APSTA) {
+    ESP_LOGI(TAG, "Setup window expired; disabling AP mode");
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Could not disable setup AP: %s", esp_err_to_name(err));
+    }
+  }
+}
+
 static void schedule_retry(void) {
   if (!s_has_credentials) {
     return;
@@ -169,6 +189,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_sta_connected = false;
+    if (s_ap_shutdown_timer) {
+      (void)esp_timer_stop(s_ap_shutdown_timer);
+    }
     s_disconnect_count++;
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     wifi_event_sta_disconnected_t *disconnected =
@@ -221,11 +244,26 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
     xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
-    // Disable AP mode when STA connects
+    // Leave the setup AP discoverable for a bounded grace period. Previously
+    // it was disabled immediately after DHCP completed, often before a phone
+    // had time to show the SSID in its Wi-Fi list.
     wifi_mode_t mode;
     if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_APSTA) {
-      ESP_LOGI(TAG, "STA connected, disabling AP mode");
-      esp_wifi_set_mode(WIFI_MODE_STA);
+      if (s_ap_shutdown_timer) {
+        (void)esp_timer_stop(s_ap_shutdown_timer);
+        esp_err_t timer_err = esp_timer_start_once(
+            s_ap_shutdown_timer,
+            (uint64_t)SETUP_AP_GRACE_SECONDS * 1000000ULL);
+        if (timer_err == ESP_OK) {
+          ESP_LOGI(TAG,
+                   "STA connected; setup AP remains available for %d seconds "
+                   "at http://" WIFI_PROVISIONING_IP_STR,
+                   SETUP_AP_GRACE_SECONDS);
+        } else {
+          ESP_LOGW(TAG, "Could not start setup AP timer: %s",
+                   esp_err_to_name(timer_err));
+        }
+      }
     }
   } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
     ESP_LOGI(TAG, "AP started");
@@ -368,6 +406,13 @@ static void wifi_init_base(void) {
       .name = "wifi_retry",
   };
   ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_retry_timer));
+
+  const esp_timer_create_args_t ap_shutdown_timer_args = {
+      .callback = ap_shutdown_timer_callback,
+      .name = "setup_ap",
+  };
+  ESP_ERROR_CHECK(
+      esp_timer_create(&ap_shutdown_timer_args, &s_ap_shutdown_timer));
 
   s_wifi_initialized = true;
 }
