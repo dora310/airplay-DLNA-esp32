@@ -443,7 +443,7 @@
 
       function resultMessage(result, successText) {
         if (result && result.success && result.http_ok !== false) {
-          return successText;
+          return result.message || successText;
         }
         return (result && result.error) ||
           `Request failed with HTTP status ${result ? result.http_status : 'unknown'}.`;
