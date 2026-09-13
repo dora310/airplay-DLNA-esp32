@@ -11,12 +11,22 @@
 static const char *TAG = "artwork_decode";
 
 typedef struct {
+  uint32_t red;
+  uint32_t green;
+  uint32_t blue;
+  uint32_t count;
+} pixel_accumulator_t;
+
+typedef struct {
   const uint8_t *input;
   size_t input_len;
   size_t input_pos;
   uint16_t *output;
   uint16_t output_width;
   uint16_t output_height;
+  uint16_t source_width;
+  uint16_t source_height;
+  pixel_accumulator_t *accumulators;
   unsigned callback_count;
 } decode_context_t;
 
@@ -36,8 +46,8 @@ static size_t jpeg_input(JDEC *decoder, uint8_t *destination,
 static int jpeg_output(JDEC *decoder, void *bitmap, JRECT *rect) {
   decode_context_t *ctx = (decode_context_t *)decoder->device;
   if (!bitmap || !rect || rect->right < rect->left ||
-      rect->bottom < rect->top || rect->right >= ctx->output_width ||
-      rect->bottom >= ctx->output_height) {
+      rect->bottom < rect->top || rect->right >= ctx->source_width ||
+      rect->bottom >= ctx->source_height) {
     return 0;
   }
 
@@ -45,12 +55,26 @@ static int jpeg_output(JDEC *decoder, void *bitmap, JRECT *rect) {
   const uint16_t block_height = rect->bottom - rect->top + 1;
   const uint16_t *source = (const uint16_t *)bitmap;
 
+  /* Decode at native JPEG resolution and box-filter into the final display
+   * size. TJpgDec's MCU descaling path produces visible repeated blocks for
+   * some Apple Music covers, especially at 1/4 and 1/8 scale. Accumulating
+   * every native pixel avoids those artifacts and gives smoother thumbnails. */
   for (uint16_t row = 0; row < block_height; ++row) {
-    uint16_t *destination =
-        ctx->output + (size_t)(rect->top + row) * ctx->output_width +
-        rect->left;
-    memcpy(destination, source + (size_t)row * block_width,
-           (size_t)block_width * sizeof(uint16_t));
+    uint32_t source_y = rect->top + row;
+    uint32_t target_y =
+        source_y * ctx->output_height / ctx->source_height;
+    for (uint16_t column = 0; column < block_width; ++column) {
+      uint32_t source_x = rect->left + column;
+      uint32_t target_x =
+          source_x * ctx->output_width / ctx->source_width;
+      uint16_t pixel = source[(size_t)row * block_width + column];
+      pixel_accumulator_t *acc =
+          &ctx->accumulators[(size_t)target_y * ctx->output_width + target_x];
+      acc->red += (pixel >> 11) & 0x1fU;
+      acc->green += (pixel >> 5) & 0x3fU;
+      acc->blue += pixel & 0x1fU;
+      ++acc->count;
+    }
   }
 
   /* Artwork has no real-time deadline. Yield periodically so decoding cannot
@@ -98,25 +122,35 @@ bool artwork_decoder_decode_jpeg(const uint8_t *jpeg, size_t jpeg_len,
     return false;
   }
 
-  uint8_t scale = 0;
-  uint32_t longest =
-      decoder.width > decoder.height ? decoder.width : decoder.height;
-  while (scale < 3 && (longest >> scale) > max_dimension) {
-    ++scale;
-  }
-
-  ctx.output_width = (uint16_t)(decoder.width >> scale);
-  ctx.output_height = (uint16_t)(decoder.height >> scale);
-
-  /* A JPEG larger than 8 * max_dimension cannot be bounded by TJpgDec's
-   * maximum 1/8 scale. Reject it rather than allocating an unexpected image. */
-  if (ctx.output_width > max_dimension || ctx.output_height > max_dimension ||
-      ctx.output_width == 0 || ctx.output_height == 0) {
-    ESP_LOGW(TAG, "JPEG dimensions exceed safe limit: %ux%u",
+  /* Bound CPU time as well as memory. AirPlay normally supplies square covers
+   * well below this limit; an extreme image is rejected without affecting
+   * text metadata or playback. */
+  if (decoder.width > 1200 || decoder.height > 1200) {
+    ESP_LOGW(TAG, "JPEG source dimensions exceed safe limit: %ux%u",
              (unsigned)decoder.width, (unsigned)decoder.height);
     heap_caps_free(work);
     return false;
   }
+
+  ctx.source_width = decoder.width;
+  ctx.source_height = decoder.height;
+  uint16_t longest =
+      decoder.width > decoder.height ? decoder.width : decoder.height;
+  uint16_t target_longest =
+      longest > max_dimension ? max_dimension : longest;
+  if (decoder.width >= decoder.height) {
+    ctx.output_width = target_longest;
+    ctx.output_height = (uint16_t)(((uint32_t)decoder.height * target_longest +
+                                    decoder.width / 2U) /
+                                   decoder.width);
+  } else {
+    ctx.output_height = target_longest;
+    ctx.output_width = (uint16_t)(((uint32_t)decoder.width * target_longest +
+                                   decoder.height / 2U) /
+                                  decoder.height);
+  }
+  if (ctx.output_width == 0) ctx.output_width = 1;
+  if (ctx.output_height == 0) ctx.output_height = 1;
 
   const size_t pixel_count =
       (size_t)ctx.output_width * (size_t)ctx.output_height;
@@ -135,13 +169,37 @@ bool artwork_decoder_decode_jpeg(const uint8_t *jpeg, size_t jpeg_len,
     return false;
   }
 
-  result = jd_decomp(&decoder, jpeg_output, scale);
+  ctx.accumulators = heap_caps_calloc(
+      pixel_count, sizeof(pixel_accumulator_t),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!ctx.accumulators) {
+    ESP_LOGW(TAG, "No PSRAM for artwork downsampling workspace");
+    heap_caps_free(ctx.output);
+    heap_caps_free(work);
+    return false;
+  }
+
+  result = jd_decomp(&decoder, jpeg_output, 0);
   heap_caps_free(work);
   if (result != JDR_OK) {
     ESP_LOGW(TAG, "JPEG decode failed: %d", (int)result);
+    heap_caps_free(ctx.accumulators);
     heap_caps_free(ctx.output);
     return false;
   }
+
+  for (size_t i = 0; i < pixel_count; ++i) {
+    const pixel_accumulator_t *acc = &ctx.accumulators[i];
+    if (acc->count == 0) {
+      ctx.output[i] = 0;
+      continue;
+    }
+    uint16_t red = (uint16_t)(acc->red / acc->count);
+    uint16_t green = (uint16_t)(acc->green / acc->count);
+    uint16_t blue = (uint16_t)(acc->blue / acc->count);
+    ctx.output[i] = (uint16_t)((red << 11) | (green << 5) | blue);
+  }
+  heap_caps_free(ctx.accumulators);
 
   out->pixels = (uint8_t *)ctx.output;
   out->data_size = output_size;

@@ -139,7 +139,7 @@ LV_FONT_DECLARE(lv_font_international_16);
 #define ARTWORK_X    10
 #define ARTWORK_Y    10
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
-#define TEXT_X       (ARTWORK_X + ARTWORK_SIZE + 12)
+#define TEXT_X       (ARTWORK_X + ARTWORK_SIZE + 20)
 #else
 #define TEXT_X       X_MARGIN
 #endif
@@ -419,6 +419,7 @@ static bool artwork_widget_set(uint8_t *rgb565, size_t data_size,
   s_artwork_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
   s_artwork_dsc.header.w = width;
   s_artwork_dsc.header.h = height;
+  s_artwork_dsc.header.stride = (uint32_t)width * sizeof(uint16_t);
   s_artwork_dsc.data_size = data_size;
   s_artwork_dsc.data = rgb565;
 
