@@ -21,7 +21,15 @@ typedef enum {
 // Metadata Event Data
 // ============================================================================
 
-#define METADATA_STRING_MAX 64
+// Bytes, not characters: Japanese and Persian UTF-8 glyphs commonly require
+// three bytes each. This leaves room for real-world track names without
+// materially increasing heap use.
+#define METADATA_STRING_MAX 192
+
+typedef enum {
+  RTSP_ARTWORK_NONE = 0,
+  RTSP_ARTWORK_JPEG = 1,
+} rtsp_artwork_format_t;
 
 typedef struct {
   char title[METADATA_STRING_MAX];  // Track title (DMAP minm / bplist itemName)
@@ -32,6 +40,9 @@ typedef struct {
   uint32_t duration_secs;           // Total track duration in seconds
   uint32_t position_secs;           // Current playback position in seconds
   bool has_artwork;                 // Whether artwork is available
+  const uint8_t *artwork_data;      // Valid only during event callbacks
+  size_t artwork_len;
+  rtsp_artwork_format_t artwork_format;
 } rtsp_metadata_t;
 
 // ============================================================================
