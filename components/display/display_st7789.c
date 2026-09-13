@@ -51,7 +51,11 @@ static const char *TAG = "display_st7789";
 #define DISPLAY_WIDTH      CONFIG_DISPLAY_ST7789_WIDTH
 #define DISPLAY_HEIGHT     CONFIG_DISPLAY_ST7789_HEIGHT
 #define LCD_HOST           SPI2_HOST
-#define LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
+/* Long jumper wires and low-cost 2.25-inch breakout boards are more reliable
+ * at 20 MHz. Larger integrated ST7789 boards retain the original 40 MHz. */
+#define LCD_PIXEL_CLOCK_HZ                                                   \
+  ((CONFIG_DISPLAY_ST7789_HEIGHT <= 100) ? (20 * 1000 * 1000)               \
+                                          : (40 * 1000 * 1000))
 #define DRAW_BUF_LINES     10
 
 // Background image path on SPIFFS
@@ -61,6 +65,23 @@ static const char *TAG = "display_st7789";
 // ============================================================================
 // Layout constants
 // ============================================================================
+
+/* The 2.25-inch ST7789P3 is an unusually short 284x76 landscape panel. Keep
+ * its essential now-playing information visible and hide the lower-priority
+ * album/status row. Larger ST7789 panels retain the original layout. */
+#define DISPLAY_COMPACT_STRIP (DISPLAY_HEIGHT <= 100)
+
+#if CONFIG_DISPLAY_ST7789_HEIGHT <= 100
+#define X_MARGIN     6
+#define X_MARGIN_R   (-6)
+#define Y_TITLE      2
+#define Y_ARTIST     21
+#define Y_ALBUM      0
+#define Y_PROGRESS   43
+#define Y_TIME       51
+#define Y_STATUS     0
+#define BAR_HEIGHT   6
+#else
 #define X_MARGIN   22
 #define X_MARGIN_R (-22)
 #define Y_TITLE    10
@@ -72,6 +93,7 @@ static const char *TAG = "display_st7789";
 #define Y_TIME     (Y_PROGRESS + 18)
 #define Y_STATUS   ((DISPLAY_HEIGHT >= 220) ? 188 : (DISPLAY_HEIGHT - 18))
 #define BAR_HEIGHT 12
+#endif
 
 // ============================================================================
 // Display state
@@ -141,7 +163,7 @@ static bool bg_load_from_spiffs(void) {
   fseek(f, 0, SEEK_SET);
 
   if (size != BG_EXPECTED_SIZE) {
-    ESP_LOGW(TAG, "Background file wrong size: %ld (expected %d) — skipping",
+    ESP_LOGW(TAG, "Background file wrong size: %ld (expected %ld) — skipping",
              size, BG_EXPECTED_SIZE);
     fclose(f);
     return false;
@@ -233,11 +255,19 @@ static void ui_create(void) {
 
   // Title — largest font, white, scrolling
   const lv_font_t *title_font =
-      (DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14 : &lv_font_montserrat_24;
+      DISPLAY_COMPACT_STRIP
+          ? &lv_font_montserrat_16
+          : ((DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14
+                                     : &lv_font_montserrat_24);
   const lv_font_t *artist_font =
-      (DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14 : &lv_font_montserrat_16;
+      DISPLAY_COMPACT_STRIP
+          ? &lv_font_montserrat_14
+          : ((DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14
+                                     : &lv_font_montserrat_16);
   s_label_title = lv_label_create(scr);
-  lv_obj_set_width(s_label_title, DISPLAY_WIDTH - (X_MARGIN * 2));
+  lv_obj_set_width(s_label_title,
+                   DISPLAY_WIDTH - (X_MARGIN * 2) -
+                       (DISPLAY_COMPACT_STRIP ? 58 : 0));
   lv_label_set_long_mode(s_label_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
   lv_obj_set_style_text_font(s_label_title, title_font, 0);
   lv_obj_set_style_text_color(s_label_title, lv_color_white(), 0);
@@ -261,6 +291,9 @@ static void ui_create(void) {
   lv_obj_set_style_text_color(s_label_album, lv_color_make(140, 140, 140), 0);
   lv_obj_align(s_label_album, LV_ALIGN_TOP_LEFT, X_MARGIN, Y_ALBUM);
   lv_label_set_text(s_label_album, "");
+  if (DISPLAY_COMPACT_STRIP) {
+    lv_obj_add_flag(s_label_album, LV_OBJ_FLAG_HIDDEN);
+  }
 
   // Paused status indicator — right side at album row, amber
   s_label_status = lv_label_create(scr);
@@ -268,6 +301,9 @@ static void ui_create(void) {
   lv_obj_set_style_text_color(s_label_status, lv_color_make(255, 200, 0), 0);
   lv_obj_align(s_label_status, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_ALBUM);
   lv_label_set_text(s_label_status, "");
+  if (DISPLAY_COMPACT_STRIP) {
+    lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+  }
 
   // Progress bar — inset from border on both sides, rounded
   s_bar_progress = lv_bar_create(scr);
@@ -305,6 +341,9 @@ static void ui_create(void) {
   lv_obj_set_style_text_color(s_label_volume, lv_color_make(150, 150, 150), 0);
   lv_obj_align(s_label_volume, LV_ALIGN_TOP_LEFT, X_MARGIN, Y_STATUS);
   lv_label_set_text(s_label_volume, "");
+  if (DISPLAY_COMPACT_STRIP) {
+    lv_obj_add_flag(s_label_volume, LV_OBJ_FLAG_HIDDEN);
+  }
 
   // Battery — status row, bottom-right
   s_label_battery = lv_label_create(scr);
@@ -312,6 +351,9 @@ static void ui_create(void) {
   lv_obj_set_style_text_color(s_label_battery, lv_color_make(150, 150, 150), 0);
   lv_obj_align(s_label_battery, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_STATUS);
   lv_label_set_text(s_label_battery, "");
+  if (DISPLAY_COMPACT_STRIP) {
+    lv_obj_add_flag(s_label_battery, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 // Update the battery + volume status row. Called from ui_update() with the
