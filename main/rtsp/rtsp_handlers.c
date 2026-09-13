@@ -806,65 +806,6 @@ static void handle_post(int socket, rtsp_conn_t *conn,
       if (bplist_find_int(body, body_len, "type", &cmd_type)) {
         ESP_LOGI(TAG, "/command type=%lld", (long long)cmd_type);
       }
-
-      // Modern AirPlay 2 carries MediaRemote NowPlayingInfo inside nested
-      // params dictionaries on /command. SET_PARAMETER alone is not enough
-      // for current Apple Music versions.
-      rtsp_event_data_t metadata_event;
-      memset(&metadata_event, 0, sizeof(metadata_event));
-      char value[METADATA_STRING_MAX];
-
-      if (bplist_find_string_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoTitle", value,
-              sizeof(value))) {
-        strlcpy(metadata_event.metadata.title, value,
-                sizeof(metadata_event.metadata.title));
-      }
-      if (bplist_find_string_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoArtist", value,
-              sizeof(value))) {
-        strlcpy(metadata_event.metadata.artist, value,
-                sizeof(metadata_event.metadata.artist));
-      }
-      if (bplist_find_string_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoAlbum", value,
-              sizeof(value))) {
-        strlcpy(metadata_event.metadata.album, value,
-                sizeof(metadata_event.metadata.album));
-      }
-      if (bplist_find_string_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoGenre", value,
-              sizeof(value))) {
-        strlcpy(metadata_event.metadata.genre, value,
-                sizeof(metadata_event.metadata.genre));
-      }
-
-      double number = 0.0;
-      if (bplist_find_real_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoDuration",
-              &number) &&
-          number > 0.0) {
-        metadata_event.metadata.duration_secs = (uint32_t)number;
-      }
-      if (bplist_find_real_deep(
-              body, body_len, "kMRMediaRemoteNowPlayingInfoElapsedTime",
-              &number) &&
-          number >= 0.0) {
-        metadata_event.metadata.position_secs = (uint32_t)number;
-      }
-
-      bool has_text = metadata_event.metadata.title[0] ||
-                      metadata_event.metadata.artist[0] ||
-                      metadata_event.metadata.album[0];
-      bool has_progress = metadata_event.metadata.duration_secs > 0 ||
-                          metadata_event.metadata.position_secs > 0;
-      if (has_text || has_progress) {
-        ESP_LOGI(TAG, "Now Playing: title='%s' artist='%s' album='%s'",
-                 metadata_event.metadata.title,
-                 metadata_event.metadata.artist,
-                 metadata_event.metadata.album);
-        rtsp_events_emit(RTSP_EVENT_METADATA, &metadata_event);
-      }
     }
     rtsp_send_ok(socket, conn, req->cseq);
 
@@ -1622,31 +1563,14 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
   } else if (strstr(req->content_type, "image/jpeg") ||
              strstr(req->content_type, "image/png")) {
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
-    // Keep artwork out of the audio path. The event is synchronous and the
-    // display listener copies accepted JPEG bytes into PSRAM before returning;
-    // decoding happens later in the display task.
-    const size_t artwork_limit = (size_t)CONFIG_AIRPLAY_ARTWORK_MAX_KB * 1024U;
-    if (!body || body_len == 0) {
-      ESP_LOGW(TAG, "Ignoring empty artwork request");
-    } else if (strstr(req->content_type, "image/png")) {
-      ESP_LOGW(TAG, "Ignoring PNG artwork (%zu bytes); JPEG only", body_len);
-    } else if (body_len > artwork_limit) {
-      ESP_LOGW(TAG, "Ignoring oversized artwork: %zu bytes (limit %zu)",
-               body_len, artwork_limit);
-    } else {
-      rtsp_event_data_t artwork_event;
-      memset(&artwork_event, 0, sizeof(artwork_event));
-      artwork_event.metadata.has_artwork = true;
-      artwork_event.metadata.artwork_data = body;
-      artwork_event.metadata.artwork_len = body_len;
-      artwork_event.metadata.artwork_format = RTSP_ARTWORK_JPEG;
-      ESP_LOGI(TAG, "Queued JPEG artwork: %zu bytes", body_len);
-      rtsp_events_emit(RTSP_EVENT_METADATA, &artwork_event);
-    }
+    // Artwork - log and flag in metadata
+    ESP_LOGI(TAG, "Received artwork: %s (%zu bytes)", req->content_type,
+             body_len);
+    event_data.metadata.has_artwork = true;
+    has_metadata = true;
 #else
-    // Artwork rendering is disabled — accept the protocol request but discard
-    // its body. Advertising artwork is retained because some Apple Music
-    // sessions send title/artist/album only with the complete metadata bundle.
+    // Artwork reception disabled — ignore it.  The md txt record already asks
+    // senders not to transmit cover art, but some send it regardless.
     ESP_LOGD(TAG, "Ignoring artwork (%s, %zu bytes): disabled in config",
              req->content_type, body_len);
 #endif
