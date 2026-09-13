@@ -27,11 +27,13 @@ static const char *TAG = "mdns_airplay";
 
 // Metadata types advertised in the "md" TXT record:
 //   0 = text (title/artist/album), 1 = artwork, 2 = progress.
-// Request the complete now-playing metadata bundle from the sender. Some
-// Apple Music/AirPlay combinations omit title/artist/album when only 0,2 is
-// advertised. Artwork rendering remains independently disabled: incoming
-// JPEG bodies are discarded by rtsp_handlers.c when the config is off.
+// Keep type 0 enabled even when artwork is disabled, otherwise Apple Music
+// sends timing updates but omits the text metadata needed by the display.
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
 #define AIRPLAY_METADATA_TYPES "0,1,2"
+#else
+#define AIRPLAY_METADATA_TYPES "0,2"
+#endif
 
 // Model identifier - AudioAccessory for speaker appearance
 // AppleTV3,2 = Apple TV, AudioAccessory5,1 = HomePod mini (speaker)
