@@ -2,8 +2,6 @@
 
 #include "sdkconfig.h"
 
-#if CONFIG_OUTPUT_SAMPLE_RATE_HZ != 44100
-
 #include "resampler.h"
 
 #include "esp_log.h"
@@ -168,35 +166,3 @@ size_t audio_resample_max_output(size_t in_frames) {
   }
   return (size_t)((double)in_frames * fixed_ratio + 2);
 }
-
-#else /* CONFIG_OUTPUT_SAMPLE_RATE_HZ == 44100 — no resampling needed */
-
-bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
-                         int channels) {
-  (void)input_rate;
-  (void)output_rate;
-  (void)channels;
-  return true;
-}
-
-size_t audio_resample_process(const int16_t *in, size_t in_frames, int16_t *out,
-                              size_t out_capacity) {
-  (void)in;
-  (void)out;
-  (void)out_capacity;
-  return in_frames;
-}
-
-bool audio_resample_is_active(void) {
-  return false;
-}
-void audio_resample_reset(void) {
-}
-void audio_resample_destroy(void) {
-}
-
-size_t audio_resample_max_output(size_t in_frames) {
-  return in_frames;
-}
-
-#endif
