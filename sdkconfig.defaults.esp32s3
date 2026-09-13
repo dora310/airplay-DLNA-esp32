@@ -63,14 +63,6 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
-CONFIG_LV_USE_BIDI=y
-CONFIG_LV_BIDI_DIR_AUTO=y
-CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=y
-# JPEG artwork is temporarily disabled. Direct LVGL JPEG rendering caused a
-# moving white rectangle on the GMT020-02/ST7789 panel. Text metadata,
-# multilingual glyphs and playback progress remain enabled.
-# CONFIG_LV_USE_TJPGD is not set
-# CONFIG_ENABLE_AIRPLAY_ARTWORK is not set
 #
 # See components/display/README.md for full setup instructions.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
