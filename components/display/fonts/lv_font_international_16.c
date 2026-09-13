@@ -4,11 +4,7 @@
  * Opts: --size 16 --bpp 2 --format lvgl --no-kerning --lv-font-name lv_font_international_16 --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf -r 0x20-0x24F,0x2010-0x201F,0x2020-0x2029,0x2030-0x205E --font font-build/node_modules/@fontsource/noto-sans-arabic/files/noto-sans-arabic-arabic-400-normal.woff -r 0x0600-0x06FF,0x0750-0x077F,0x0870-0x088E,0x0890-0x0891,0x0897-0x08FF,0xFB50-0xFDFF,0xFE70-0xFEFC --font font-build/node_modules/@fontsource/noto-sans-jp/files/noto-sans-jp-japanese-400-normal.woff -r 0x3000-0x30FF,0x4E00-0x9FFF -o font-build/lv_font_international_16.c
  ******************************************************************************/
 
-#ifdef LV_LVGL_H_INCLUDE_SIMPLE
 #include "lvgl.h"
-#else
-#include "lvgl/lvgl.h"
-#endif
 
 #ifndef LV_FONT_INTERNATIONAL_16
 #define LV_FONT_INTERNATIONAL_16 1
@@ -81096,4 +81092,3 @@ lv_font_t lv_font_international_16 = {
 
 
 #endif /*#if LV_FONT_INTERNATIONAL_16*/
-
