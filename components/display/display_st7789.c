@@ -31,6 +31,7 @@
 #include "esp_lvgl_port.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "esp_wifi.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -45,6 +46,23 @@
 #include <string.h>
 
 static const char *TAG = "display_st7789";
+
+/* Build a useful, truthful fallback while AirPlay metadata is still pending.
+ * The receiver can always read the associated access-point SSID. AirPlay does
+ * not reliably provide the sender's friendly iPhone/iPad name, so do not show
+ * a made-up device name here. */
+static void wifi_status_text(char *out, size_t out_size) {
+  if (!out || out_size == 0) {
+    return;
+  }
+
+  wifi_ap_record_t ap = {0};
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.ssid[0] != '\0') {
+    snprintf(out, out_size, "Wi-Fi: %s", (const char *)ap.ssid);
+  } else {
+    snprintf(out, out_size, "Wi-Fi not connected");
+  }
+}
 
 // Generated 16 px UTF-8 font containing Latin/Spanish, Persian/Arabic and
 // common Japanese glyphs. LVGL's bidi and Arabic/Persian shaping options are
@@ -699,6 +717,9 @@ static void ui_update(void) {
   uint8_t *pending_artwork = NULL;
   size_t pending_artwork_len = 0;
   bool clear_artwork = false;
+  char wifi_text[48];
+
+  wifi_status_text(wifi_text, sizeof(wifi_text));
 
   STATE_LOCK();
   memcpy(title, s_display.title, sizeof(title));
@@ -760,7 +781,7 @@ static void ui_update(void) {
   switch (state) {
   case DISPLAY_STATE_STANDBY:
     lv_label_set_text(s_label_title, "AirPlay Ready");
-    lv_label_set_text(s_label_artist, "");
+    lv_label_set_text(s_label_artist, wifi_text);
     lv_label_set_text(s_label_album, "");
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
@@ -773,9 +794,11 @@ static void ui_update(void) {
     // Metadata can arrive before RECORD/SETRATEANCHORTIME changes the state
     // to PLAYING. Render it immediately instead of hiding it behind the fixed
     // Connected/Ready message.
-    lv_label_set_text(s_label_title, title[0] ? title : "Connected");
-    lv_label_set_text(s_label_artist, artist[0] ? artist : "");
-    lv_label_set_text(s_label_album, album[0] ? album : "");
+    lv_label_set_text(s_label_title,
+                      title[0] ? title : "AirPlay Connected");
+    lv_label_set_text(s_label_artist,
+                      artist[0] ? artist : "Waiting for track details...");
+    lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
@@ -785,9 +808,14 @@ static void ui_update(void) {
 
   case DISPLAY_STATE_PLAYING:
   case DISPLAY_STATE_PAUSED: {
-    lv_label_set_text(s_label_title, title[0] ? title : "---");
-    lv_label_set_text(s_label_artist, artist[0] ? artist : "");
-    lv_label_set_text(s_label_album, album[0] ? album : "");
+    lv_label_set_text(s_label_title,
+                      title[0] ? title
+                               : (state == DISPLAY_STATE_PAUSED
+                                      ? "AirPlay Paused"
+                                      : "AirPlay Playing"));
+    lv_label_set_text(s_label_artist,
+                      artist[0] ? artist : "Waiting for track details...");
+    lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
     lv_label_set_text(s_label_status,
                       state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
 

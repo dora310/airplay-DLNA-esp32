@@ -18,6 +18,7 @@ if(CONFIG_DISPLAY_ENABLED)
         target_link_libraries(${COMPONENT_LIB} PRIVATE
             idf::esp_lcd
             idf::driver
+            idf::esp_wifi
             idf::esp_timer
             idf::espressif__esp_lvgl_port
             idf::spiffs_storage)
