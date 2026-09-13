@@ -1,6 +1,7 @@
 #include "dlna_renderer.h"
 
 #include "audio_output.h"
+#include "display.h"
 #include "ethernet.h"
 #include "playback_control.h"
 #include "settings.h"
@@ -16,8 +17,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
@@ -30,12 +29,8 @@
 #include <strings.h>
 
 #define DLNA_SOAP_BODY_MAX      8192
-#define DLNA_INPUT_BUFFER_SIZE  16384
+#define DLNA_INPUT_BUFFER_SIZE  4096
 #define DLNA_OUTPUT_BUFFER_SIZE 8192
-#define DLNA_PCM_BUFFER_SIZE    ((size_t)128 * 1024)
-#define DLNA_PCM_PREFETCH_SIZE  ((size_t)64 * 1024)
-#define DLNA_PCM_WRITE_SIZE     2048
-#define DLNA_PCM_WRITER_STACK   4096
 #define DLNA_SSDP_PORT          1900
 #define DLNA_NOTIFY_SECONDS     900
 #define DLNA_PLAYER_STACK_SIZE  10240
@@ -69,19 +64,6 @@ static char s_udn[48];
 static bool s_handlers_registered;
 static bool s_decoders_registered;
 static uint16_t s_http_port = 80;
-
-typedef struct {
-  StreamBufferHandle_t stream;
-  StaticStreamBuffer_t *control;
-  uint8_t *storage;
-  SemaphoreHandle_t start_sem;
-  TaskHandle_t writer_task;
-  volatile bool running;
-  volatile bool started;
-  volatile bool drain_on_stop;
-} dlna_pcm_pipe_t;
-
-static dlna_pcm_pipe_t s_pcm_pipe;
 
 static const char *AVTRANSPORT_SERVICE =
     "urn:schemas-upnp-org:service:AVTransport:1";
@@ -264,6 +246,64 @@ static bool xml_value(const char *body, const char *tag, char *out,
   return true;
 }
 
+/* Extract HH:MM:SS[.mmm] from the DIDL-Lite res duration attribute. */
+static uint32_t metadata_duration_secs(const char *metadata) {
+  const char *p = metadata ? strstr(metadata, "duration=") : NULL;
+  if (!p) {
+    return 0;
+  }
+  p += strlen("duration=");
+  if (*p != '\'' && *p != '"') {
+    return 0;
+  }
+  p++;
+
+  unsigned hours = 0, minutes = 0;
+  double seconds = 0;
+  if (sscanf(p, "%u:%u:%lf", &hours, &minutes, &seconds) != 3 ||
+      minutes > 59 || seconds < 0 || seconds >= 60) {
+    return 0;
+  }
+  return hours * 3600U + minutes * 60U + (uint32_t)seconds;
+}
+
+/* DLNA previously kept DIDL metadata private to the renderer, so the display
+ * only received AirPlay RTSP metadata. Translate the current DIDL-Lite item
+ * into the existing display event format instead of adding another UI path. */
+static void emit_dlna_metadata(void) {
+  char title[64] = {0};
+  char artist[64] = {0};
+  char album[64] = {0};
+  bool found = false;
+
+  found |= xml_value(s_metadata, "dc:title", title, sizeof(title));
+  found |= xml_value(s_metadata, "upnp:artist", artist, sizeof(artist));
+  found |= xml_value(s_metadata, "upnp:album", album, sizeof(album));
+  uint32_t duration_secs = metadata_duration_secs(s_metadata);
+  found |= duration_secs > 0;
+
+  /* Some controllers omit DIDL-Lite. Give the display a useful fallback
+   * rather than showing three dashes. */
+  if (!title[0] && s_uri[0]) {
+    const char *name = strrchr(s_uri, '/');
+    name = name ? name + 1 : s_uri;
+    size_t len = strcspn(name, "?#");
+    if (len >= sizeof(title)) {
+      len = sizeof(title) - 1;
+    }
+    memcpy(title, name, len);
+    title[len] = '\0';
+    found |= len > 0;
+  }
+
+  if (found) {
+    ESP_LOGI(TAG, "Display metadata: title='%s' artist='%s' album='%s' "
+                  "duration=%lus",
+             title, artist, album, (unsigned long)duration_secs);
+    display_notify_metadata(title, artist, album, duration_secs, 0);
+  }
+}
+
 static const char *soap_action(httpd_req_t *req, const char *body) {
   static char action[64];
   if (httpd_req_get_hdr_value_str(req, "SOAPACTION", action,
@@ -326,158 +366,6 @@ static esp_err_t soap_fault(httpd_req_t *req, int code,
   return send_xml(req, xml);
 }
 
-static void dlna_pcm_writer_task(void *arg) {
-  dlna_pcm_pipe_t *pipe = (dlna_pcm_pipe_t *)arg;
-  uint8_t *chunk = heap_caps_malloc(DLNA_PCM_WRITE_SIZE,
-                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  uint8_t *silence = heap_caps_calloc(1, DLNA_PCM_WRITE_SIZE,
-                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-
-  if (!chunk || !silence) {
-    ESP_LOGE(TAG, "Cannot allocate DLNA I2S writer buffer");
-    free(chunk);
-    free(silence);
-    pipe->running = false;
-    pipe->writer_task = NULL;
-    vTaskDelete(NULL);
-    return;
-  }
-
-  /* Do not start I2S until enough decoded PCM has been accumulated. This
-   * isolates the DAC from short HTTP and decoder scheduling delays. */
-  xSemaphoreTake(pipe->start_sem, portMAX_DELAY);
-
-  while (pipe->running ||
-         (pipe->drain_on_stop &&
-          xStreamBufferBytesAvailable(pipe->stream) > 0)) {
-    size_t bytes = xStreamBufferReceive(pipe->stream, chunk,
-                                        DLNA_PCM_WRITE_SIZE,
-                                        pdMS_TO_TICKS(20));
-    bytes &= ~(size_t)3; /* complete 16-bit stereo frames only */
-    if (bytes > 0) {
-      esp_err_t err = audio_output_write_pcm_unscaled(
-          (int16_t *)chunk, bytes / 4, portMAX_DELAY);
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "DLNA I2S write failed: %s", esp_err_to_name(err));
-        pipe->running = false;
-        break;
-      }
-    } else if (pipe->running) {
-      /* Keep the I2S clock continuous during an unusually long network gap.
-       * The prebuffer normally prevents this path from being reached. */
-      memset(silence, 0, DLNA_PCM_WRITE_SIZE);
-      audio_output_write_pcm_unscaled((int16_t *)silence,
-                                      DLNA_PCM_WRITE_SIZE / 4,
-                                      pdMS_TO_TICKS(20));
-    }
-  }
-
-  free(chunk);
-  free(silence);
-  pipe->writer_task = NULL;
-  vTaskDelete(NULL);
-}
-
-static esp_err_t dlna_pcm_pipe_start(void) {
-  dlna_pcm_pipe_t *pipe = &s_pcm_pipe;
-  memset(pipe, 0, sizeof(*pipe));
-
-  /* Static stream-buffer storage can live in PSRAM; its small control block
-   * and semaphore remain in internal RAM. One extra byte is required by the
-   * FreeRTOS static stream-buffer implementation. */
-  pipe->storage = heap_caps_malloc(DLNA_PCM_BUFFER_SIZE + 1,
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  pipe->control = calloc(1, sizeof(*pipe->control));
-  pipe->start_sem = xSemaphoreCreateBinary();
-  if (!pipe->storage || !pipe->control || !pipe->start_sem) {
-    free(pipe->storage);
-    free(pipe->control);
-    if (pipe->start_sem) {
-      vSemaphoreDelete(pipe->start_sem);
-    }
-    memset(pipe, 0, sizeof(*pipe));
-    return ESP_ERR_NO_MEM;
-  }
-
-  pipe->stream = xStreamBufferCreateStatic(
-      DLNA_PCM_BUFFER_SIZE, 1, pipe->storage, pipe->control);
-  if (!pipe->stream) {
-    free(pipe->storage);
-    free(pipe->control);
-    vSemaphoreDelete(pipe->start_sem);
-    memset(pipe, 0, sizeof(*pipe));
-    return ESP_ERR_NO_MEM;
-  }
-
-  pipe->running = true;
-  if (xTaskCreatePinnedToCore(dlna_pcm_writer_task, "dlna_i2s",
-                              DLNA_PCM_WRITER_STACK, pipe, 7,
-                              &pipe->writer_task, 1) != pdPASS) {
-    pipe->running = false;
-    vStreamBufferDelete(pipe->stream);
-    free(pipe->storage);
-    free(pipe->control);
-    vSemaphoreDelete(pipe->start_sem);
-    memset(pipe, 0, sizeof(*pipe));
-    return ESP_ERR_NO_MEM;
-  }
-  return ESP_OK;
-}
-
-static esp_err_t dlna_pcm_pipe_write(const void *data, size_t bytes) {
-  dlna_pcm_pipe_t *pipe = &s_pcm_pipe;
-  if (!pipe->stream || !pipe->running || !data) {
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  const uint8_t *src = (const uint8_t *)data;
-  size_t sent = 0;
-  while (sent < bytes && !s_stop_requested && pipe->running) {
-    size_t n = xStreamBufferSend(pipe->stream, src + sent, bytes - sent,
-                                 pdMS_TO_TICKS(100));
-    sent += n;
-    if (!pipe->started &&
-        xStreamBufferBytesAvailable(pipe->stream) >=
-            DLNA_PCM_PREFETCH_SIZE) {
-      pipe->started = true;
-      xSemaphoreGive(pipe->start_sem);
-    }
-  }
-  return sent == bytes ? ESP_OK : ESP_FAIL;
-}
-
-static void dlna_pcm_pipe_stop(bool drain) {
-  dlna_pcm_pipe_t *pipe = &s_pcm_pipe;
-  if (!pipe->stream) {
-    return;
-  }
-
-  pipe->drain_on_stop = drain;
-  if (drain && xStreamBufferBytesAvailable(pipe->stream) > 0) {
-    pipe->started = true;
-    xSemaphoreGive(pipe->start_sem);
-  }
-  pipe->running = false;
-  /* Also release a writer waiting for prefetch when stopping or on a short
-   * track. It will drain queued PCM only when drain is true. */
-  xSemaphoreGive(pipe->start_sem);
-
-  for (int i = 0; i < 600 && pipe->writer_task; i++) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-  if (pipe->writer_task) {
-    ESP_LOGW(TAG, "DLNA I2S writer did not stop in time");
-    vTaskDelete(pipe->writer_task);
-    pipe->writer_task = NULL;
-  }
-
-  vStreamBufferDelete(pipe->stream);
-  free(pipe->storage);
-  free(pipe->control);
-  vSemaphoreDelete(pipe->start_sem);
-  memset(pipe, 0, sizeof(*pipe));
-}
-
 static void pcm_apply_gain(int16_t *pcm, size_t samples) {
   int volume = s_muted ? 0 : s_volume_percent;
   int32_t gain_q15 = (int32_t)volume * 32767 / 100;
@@ -490,7 +378,8 @@ static esp_err_t write_pcm(uint8_t *pcm_bytes, size_t bytes, int channels) {
   if (channels == 2) {
     bytes &= ~(size_t)3;
     pcm_apply_gain((int16_t *)pcm_bytes, bytes / sizeof(int16_t));
-    return bytes ? dlna_pcm_pipe_write(pcm_bytes, bytes)
+    return bytes ? audio_output_write_pcm((int16_t *)pcm_bytes, bytes / 4,
+                                          portMAX_DELAY)
                  : ESP_OK;
   }
   if (channels != 1) {
@@ -507,7 +396,8 @@ static esp_err_t write_pcm(uint8_t *pcm_bytes, size_t bytes, int channels) {
       stereo[i * 2 + 1] = mono[i];
     }
     pcm_apply_gain(stereo, count * 2);
-    esp_err_t err = dlna_pcm_pipe_write(stereo, count * 4);
+    esp_err_t err =
+        audio_output_write_pcm(stereo, count, portMAX_DELAY);
     if (err != ESP_OK) {
       return err;
     }
@@ -657,7 +547,6 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
   size_t input_len = first_len;
   bool eof = false;
   bool format_ready = false;
-  bool need_more_input = first_len == 0;
   esp_err_t result = ESP_OK;
 
   while (!s_stop_requested) {
@@ -665,17 +554,11 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       break;
     }
 
-    if (need_more_input && !eof) {
-      size_t room = DLNA_INPUT_BUFFER_SIZE - input_len;
-      if (room == 0) {
-        ESP_LOGE(TAG, "DLNA decoder stalled with a full input buffer");
-        result = ESP_ERR_INVALID_SIZE;
-        break;
-      }
-      int n = esp_http_client_read(client, (char *)input + input_len, room);
+    if (input_len == 0 && !eof) {
+      int n = esp_http_client_read(client, (char *)input,
+                                   DLNA_INPUT_BUFFER_SIZE);
       if (n > 0) {
-        input_len += (size_t)n;
-        need_more_input = false;
+        input_len = (size_t)n;
       } else if (n == 0) {
         eof = true;
       } else if (s_stop_requested) {
@@ -695,14 +578,12 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
         .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
     };
     bool process_once = true;
-    bool decoder_needs_more = false;
     while (!s_stop_requested && (raw.len > 0 || (eof && process_once))) {
       esp_audio_simple_dec_out_t out = {
           .buffer = output,
           .len = output_capacity,
       };
       uint32_t before = raw.len;
-      raw.consumed = 0;
       esp_audio_err_t dec_err =
           esp_audio_simple_dec_process(decoder, &raw, &out);
       if (dec_err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
@@ -735,20 +616,7 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
           break;
         }
         if (!format_ready) {
-          if (info.sample_rate < 8000 || info.sample_rate > 192000) {
-            ESP_LOGE(TAG, "Unsupported DLNA sample rate: %lu",
-                     (unsigned long)info.sample_rate);
-            result = ESP_ERR_NOT_SUPPORTED;
-            s_stop_requested = true;
-            break;
-          }
           audio_output_set_sample_rate(info.sample_rate);
-          result = dlna_pcm_pipe_start();
-          if (result != ESP_OK) {
-            ESP_LOGE(TAG, "Cannot create DLNA PCM prebuffer");
-            s_stop_requested = true;
-            break;
-          }
           ESP_LOGI(TAG, "DLNA %s: %lu Hz, %u channel", decoder_name(type),
                    (unsigned long)info.sample_rate, info.channel);
           format_ready = true;
@@ -769,25 +637,15 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       raw.len -= raw.consumed;
       process_once = false;
       if (before == raw.len && out.decoded_size == 0) {
-        decoder_needs_more = !eof;
         break;
       }
     }
-
-    /* A compressed frame can span two HTTP reads. Preserve every byte the
-     * decoder did not consume, then append the next read after it. Discarding
-     * these bytes corrupts MP3/AAC/FLAC frame boundaries and causes clicks. */
-    input_len = raw.len;
-    if (input_len > 0 && raw.buffer != input) {
-      memmove(input, raw.buffer, input_len);
-    }
+    input_len = 0;
     if (eof) {
       break;
     }
-    need_more_input = input_len == 0 || decoder_needs_more;
   }
 
-  dlna_pcm_pipe_stop(result == ESP_OK && eof && !s_stop_requested);
   free(output);
   esp_audio_simple_dec_close(decoder);
   return result;
@@ -823,8 +681,7 @@ static void player_task(void *arg) {
 
   esp_http_client_config_t config = {
       .url = uri,
-      /* A short Wi-Fi pause must not abort an otherwise healthy DLNA track. */
-      .timeout_ms = 5000,
+      .timeout_ms = 1500,
       .buffer_size = DLNA_INPUT_BUFFER_SIZE,
       .buffer_size_tx = 1024,
       .disable_auto_redirect = false,
@@ -847,6 +704,8 @@ static void player_task(void *arg) {
   if (err == ESP_OK && input && first_len > 0 && !s_stop_requested &&
       !s_airplay_active) {
     s_state = DLNA_STATE_PLAYING;
+    emit_dlna_metadata();
+    display_notify_playback(false);
     decode_http_stream(client, uri, input, first_len);
   } else if (!s_stop_requested && !s_airplay_active) {
     ESP_LOGE(TAG, "Cannot open DLNA media URL");
@@ -865,6 +724,7 @@ static void player_task(void *arg) {
   if (playback_control_get_source() == PLAYBACK_SOURCE_DLNA) {
     playback_control_set_source(PLAYBACK_SOURCE_NONE);
   }
+  display_notify_stopped();
   restore_airplay_output();
   ESP_LOGI(TAG, "DLNA playback ended; AirPlay remained available");
   s_player_task = NULL;
@@ -926,6 +786,7 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
     xml_value(body, "CurrentURI", s_uri, sizeof(s_uri));
     xml_value(body, "CurrentURIMetaData", s_metadata, sizeof(s_metadata));
     ESP_LOGI(TAG, "Set URI: %.160s", s_uri);
+    emit_dlna_metadata();
   } else if (!strcmp(action_copy, "Play")) {
     if (s_airplay_active) {
       free(body);
@@ -933,6 +794,7 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
     }
     if (s_state == DLNA_STATE_PAUSED) {
       s_state = DLNA_STATE_PLAYING;
+      display_notify_playback(false);
     } else if (!start_player()) {
       free(body);
       return soap_fault(req, 704, "Cannot play media");
@@ -940,9 +802,11 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
   } else if (!strcmp(action_copy, "Pause")) {
     if (s_state == DLNA_STATE_PLAYING) {
       s_state = DLNA_STATE_PAUSED;
+      display_notify_playback(true);
     }
   } else if (!strcmp(action_copy, "Stop")) {
     stop_player(false);
+    display_notify_stopped();
   } else if (!strcmp(action_copy, "GetTransportInfo")) {
     snprintf(args, sizeof(args),
              "<CurrentTransportState>%s</CurrentTransportState>"
@@ -1357,8 +1221,10 @@ bool dlna_renderer_is_playing(void) {
 void dlna_renderer_toggle_pause(void) {
   if (s_state == DLNA_STATE_PLAYING) {
     s_state = DLNA_STATE_PAUSED;
+    display_notify_playback(true);
   } else if (s_state == DLNA_STATE_PAUSED) {
     s_state = DLNA_STATE_PLAYING;
+    display_notify_playback(false);
   }
 }
 
@@ -1389,9 +1255,13 @@ esp_err_t dlna_renderer_play_uri(const char *uri) {
   }
   strlcpy(s_uri, uri, sizeof(s_uri));
   s_metadata[0] = '\0';
+  emit_dlna_metadata();
   return start_player() ? ESP_OK : ESP_FAIL;
 }
 
-void dlna_renderer_stop_playback(void) { stop_player(false); }
+void dlna_renderer_stop_playback(void) {
+  stop_player(false);
+  display_notify_stopped();
+}
 
 const char *dlna_renderer_current_uri(void) { return s_uri; }
