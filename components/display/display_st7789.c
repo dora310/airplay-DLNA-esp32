@@ -655,9 +655,12 @@ static void ui_update(void) {
     break;
 
   case DISPLAY_STATE_CONNECTED:
-    lv_label_set_text(s_label_title, "Connected");
-    lv_label_set_text(s_label_artist, "");
-    lv_label_set_text(s_label_album, "");
+    // Metadata can arrive before RECORD/SETRATEANCHORTIME changes the state
+    // to PLAYING. Render it immediately instead of hiding it behind the fixed
+    // Connected/Ready message.
+    lv_label_set_text(s_label_title, title[0] ? title : "Connected");
+    lv_label_set_text(s_label_artist, artist[0] ? artist : "");
+    lv_label_set_text(s_label_album, album[0] ? album : "");
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
