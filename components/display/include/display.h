@@ -2,6 +2,9 @@
 
 #include "sdkconfig.h"
 
+#include <stdbool.h>
+#include <stdint.h>
+
 /**
  * OLED display module - Shows track metadata, playback position &
  * progress bar. Registers as an RTSP event observer to receive metadata
@@ -24,10 +27,37 @@
  */
 void display_init(void *bus);
 
+/** Update now-playing text and timing from a non-RTSP source such as DLNA. */
+void display_notify_metadata(const char *title, const char *artist,
+                             const char *album, uint32_t duration_secs,
+                             uint32_t position_secs);
+
+/** Set the visible transport state for a non-RTSP source. */
+void display_notify_playback(bool paused);
+
+/** Return the display to its standby screen. */
+void display_notify_stopped(void);
+
 #else
 
 static inline void display_init(void *bus) {
   (void)bus;
 }
+
+static inline void display_notify_metadata(const char *title,
+                                           const char *artist,
+                                           const char *album,
+                                           uint32_t duration_secs,
+                                           uint32_t position_secs) {
+  (void)title;
+  (void)artist;
+  (void)album;
+  (void)duration_secs;
+  (void)position_secs;
+}
+
+static inline void display_notify_playback(bool paused) { (void)paused; }
+
+static inline void display_notify_stopped(void) {}
 
 #endif
