@@ -15,6 +15,11 @@ if(CONFIG_DISPLAY_ENABLED)
         target_sources(${COMPONENT_LIB} PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/display_st7789.c"
             "${CMAKE_CURRENT_SOURCE_DIR}/fonts/lv_font_international_16.c")
+        if(CONFIG_ENABLE_AIRPLAY_ARTWORK)
+            target_sources(${COMPONENT_LIB} PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/artwork_decoder.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tjpgd/tjpgd.c")
+        endif()
         target_link_libraries(${COMPONENT_LIB} PRIVATE
             idf::esp_lcd
             idf::driver

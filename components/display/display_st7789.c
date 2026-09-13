@@ -21,6 +21,9 @@
 
 #include "display.h"
 #include "audio_output.h"
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+#include "artwork_decoder.h"
+#endif
 #include "board_common.h"
 #include "playback_control.h"
 #include "rtsp_events.h"
@@ -38,6 +41,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "lvgl.h"
 #include "misc/cache/instance/lv_image_cache.h"
 
@@ -134,7 +138,11 @@ LV_FONT_DECLARE(lv_font_international_16);
 #define ARTWORK_SIZE 112
 #define ARTWORK_X    10
 #define ARTWORK_Y    10
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+#define TEXT_X       (ARTWORK_X + ARTWORK_SIZE + 12)
+#else
 #define TEXT_X       X_MARGIN
+#endif
 #define TEXT_RIGHT   X_MARGIN
 #endif
 
@@ -192,9 +200,8 @@ static lv_obj_t *s_theme_layer = NULL;
 static lv_obj_t *s_artwork_image = NULL;
 static lv_obj_t *s_artwork_placeholder = NULL;
 
-// R29 changes the colour theme from track metadata only. Album-art reception
-// and JPEG rendering remain disabled. A later revision can feed a colour
-// extracted from decoded artwork into the same apply_track_theme() function.
+// R29 changes the colour theme from track metadata. R33 keeps that stable
+// fallback while displaying separately decoded, bounded RGB565 album art.
 typedef struct {
   uint8_t bg_r;
   uint8_t bg_g;
@@ -219,15 +226,30 @@ static const display_palette_t s_track_palettes[] = {
 
 static uint32_t s_applied_theme_key = UINT32_MAX;
 
-// Compressed JPEG ownership is transferred from the RTSP callback to the
-// display task. Both pending fields are protected by s_state_mutex. Active
-// fields are touched only while the LVGL lock is held.
+// Decoded RGB565 ownership moves from the low-priority artwork worker to the
+// display task. Pending fields are protected by s_state_mutex. Active fields
+// are touched only while the LVGL lock is held.
 static uint8_t *s_artwork_pending = NULL;
 static size_t s_artwork_pending_len = 0;
+static uint16_t s_artwork_pending_width = 0;
+static uint16_t s_artwork_pending_height = 0;
 static bool s_artwork_pending_ready = false;
 static bool s_artwork_clear_requested = false;
 static uint8_t *s_artwork_active = NULL;
 static lv_image_dsc_t s_artwork_dsc;
+
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+#define ARTWORK_DECODE_MAX_DIM 224
+
+typedef struct {
+  uint8_t *jpeg;
+  size_t jpeg_len;
+  uint32_t generation;
+} artwork_job_t;
+
+static QueueHandle_t s_artwork_queue = NULL;
+static uint32_t s_artwork_generation = 1;
+#endif
 
 // ============================================================================
 // Background loading
@@ -368,60 +390,17 @@ static void apply_track_theme(const char *title, const char *artist,
   ESP_LOGI(TAG, "Track colour theme: %u", (unsigned)palette_index);
 }
 
-static bool jpeg_get_dimensions(const uint8_t *data, size_t len,
-                                uint16_t *width, uint16_t *height) {
-  if (!data || len < 4 || data[0] != 0xff || data[1] != 0xd8) {
-    return false;
-  }
-
-  size_t pos = 2;
-  while (pos + 4 <= len) {
-    while (pos < len && data[pos] != 0xff) {
-      pos++;
-    }
-    while (pos < len && data[pos] == 0xff) {
-      pos++;
-    }
-    if (pos >= len) {
-      break;
-    }
-
-    uint8_t marker = data[pos++];
-    if (marker == 0xd8 || marker == 0xd9 || marker == 0x01 ||
-        (marker >= 0xd0 && marker <= 0xd7)) {
-      continue;
-    }
-    if (pos + 2 > len) {
-      break;
-    }
-
-    size_t segment_len = ((size_t)data[pos] << 8) | data[pos + 1];
-    if (segment_len < 2 || pos + segment_len > len) {
-      break;
-    }
-
-    bool is_sof = (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 &&
-                   marker != 0xc8 && marker != 0xcc);
-    if (is_sof && segment_len >= 7) {
-      *height = (uint16_t)(((uint16_t)data[pos + 3] << 8) | data[pos + 4]);
-      *width = (uint16_t)(((uint16_t)data[pos + 5] << 8) | data[pos + 6]);
-      return *width > 0 && *height > 0;
-    }
-    pos += segment_len;
-  }
-  return false;
-}
-
-// Must be called with the LVGL lock held. Takes ownership of jpeg_data when
-// successful; on failure the caller remains responsible for freeing it.
-static bool artwork_widget_set(uint8_t *jpeg_data, size_t jpeg_len) {
+// Must be called with the LVGL lock held. Takes ownership of an already
+// decoded RGB565 buffer on success. LVGL never sees the compressed JPEG and
+// therefore cannot retain a decoder reference to the RTSP request buffer.
+static bool artwork_widget_set(uint8_t *rgb565, size_t data_size,
+                               uint16_t width, uint16_t height) {
   if (!s_artwork_placeholder) {
     return false;
   }
-
-  uint16_t width = 0, height = 0;
-  if (!jpeg_get_dimensions(jpeg_data, jpeg_len, &width, &height)) {
-    ESP_LOGW(TAG, "Rejected artwork with invalid JPEG dimensions");
+  if (!rgb565 || width == 0 || height == 0 ||
+      data_size != (size_t)width * height * sizeof(uint16_t)) {
+    ESP_LOGW(TAG, "Rejected invalid RGB565 artwork");
     return false;
   }
 
@@ -437,11 +416,11 @@ static bool artwork_widget_set(uint8_t *jpeg_data, size_t jpeg_len) {
 
   memset(&s_artwork_dsc, 0, sizeof(s_artwork_dsc));
   s_artwork_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-  s_artwork_dsc.header.cf = LV_COLOR_FORMAT_RAW;
+  s_artwork_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
   s_artwork_dsc.header.w = width;
   s_artwork_dsc.header.h = height;
-  s_artwork_dsc.data_size = jpeg_len;
-  s_artwork_dsc.data = jpeg_data;
+  s_artwork_dsc.data_size = data_size;
+  s_artwork_dsc.data = rgb565;
 
   s_artwork_image = lv_image_create(lv_screen_active());
   lv_image_set_src(s_artwork_image, &s_artwork_dsc);
@@ -454,13 +433,19 @@ static bool artwork_widget_set(uint8_t *jpeg_data, size_t jpeg_len) {
     scale = 1;
   }
   lv_image_set_scale(s_artwork_image, scale);
-  lv_obj_align(s_artwork_image, LV_ALIGN_TOP_LEFT, ARTWORK_X, ARTWORK_Y);
+  lv_obj_align(s_artwork_image, LV_ALIGN_TOP_LEFT,
+               ARTWORK_X + (ARTWORK_SIZE -
+                            (int32_t)((uint32_t)width * scale / 256U)) /
+                               2,
+               ARTWORK_Y + (ARTWORK_SIZE -
+                            (int32_t)((uint32_t)height * scale / 256U)) /
+                               2);
   lv_obj_t *parent = lv_obj_get_parent(s_artwork_image);
   lv_obj_move_to_index(s_artwork_image, lv_obj_get_child_count(parent) - 1);
   lv_obj_add_flag(s_artwork_placeholder, LV_OBJ_FLAG_HIDDEN);
-  s_artwork_active = jpeg_data;
-  ESP_LOGI(TAG, "Displaying JPEG artwork: %ux%u, %zu bytes", width, height,
-           jpeg_len);
+  s_artwork_active = rgb565;
+  ESP_LOGI(TAG, "Displaying RGB565 artwork: %ux%u, %zu bytes", width, height,
+           data_size);
   return true;
 }
 
@@ -479,6 +464,84 @@ static void artwork_widget_clear(void) {
     lv_obj_clear_flag(s_artwork_placeholder, LV_OBJ_FLAG_HIDDEN);
   }
 }
+
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+static void artwork_task(void *arg) {
+  (void)arg;
+  artwork_job_t job;
+
+  for (;;) {
+    if (xQueueReceive(s_artwork_queue, &job, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+
+    artwork_rgb565_t decoded;
+    bool ok = artwork_decoder_decode_jpeg(
+        job.jpeg, job.jpeg_len, ARTWORK_DECODE_MAX_DIM, &decoded);
+    heap_caps_free(job.jpeg);
+
+    if (!ok) {
+      continue;
+    }
+
+    STATE_LOCK();
+    bool current = job.generation == s_artwork_generation &&
+                   s_display.state != DISPLAY_STATE_STANDBY;
+    uint8_t *old_pending = NULL;
+    if (current) {
+      old_pending = s_artwork_pending;
+      s_artwork_pending = decoded.pixels;
+      s_artwork_pending_len = decoded.data_size;
+      s_artwork_pending_width = decoded.width;
+      s_artwork_pending_height = decoded.height;
+      s_artwork_pending_ready = true;
+      s_display.dirty = true;
+      decoded.pixels = NULL;
+    }
+    STATE_UNLOCK();
+
+    if (old_pending) {
+      heap_caps_free(old_pending);
+    }
+    artwork_decoder_free(&decoded);
+  }
+}
+
+static void artwork_queue_jpeg(const uint8_t *jpeg, size_t jpeg_len) {
+  if (!s_artwork_queue || !jpeg || jpeg_len == 0) {
+    return;
+  }
+
+  uint8_t *copy =
+      heap_caps_malloc(jpeg_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!copy) {
+    ESP_LOGW(TAG, "No PSRAM for %zu-byte artwork", jpeg_len);
+    return;
+  }
+  memcpy(copy, jpeg, jpeg_len);
+
+  STATE_LOCK();
+  uint32_t generation = s_artwork_generation;
+  STATE_UNLOCK();
+
+  artwork_job_t job = {
+      .jpeg = copy,
+      .jpeg_len = jpeg_len,
+      .generation = generation,
+  };
+
+  if (xQueueSend(s_artwork_queue, &job, 0) != pdTRUE) {
+    artwork_job_t stale;
+    if (xQueueReceive(s_artwork_queue, &stale, 0) == pdTRUE) {
+      heap_caps_free(stale.jpeg);
+    }
+    if (xQueueSend(s_artwork_queue, &job, 0) != pdTRUE) {
+      heap_caps_free(job.jpeg);
+      ESP_LOGW(TAG, "Artwork queue busy; discarded image");
+    }
+  }
+}
+#endif
 
 // ============================================================================
 // UI creation - called once after LVGL init, with lock held
@@ -716,6 +779,8 @@ static void ui_update(void) {
   display_state_t state;
   uint8_t *pending_artwork = NULL;
   size_t pending_artwork_len = 0;
+  uint16_t pending_artwork_width = 0;
+  uint16_t pending_artwork_height = 0;
   bool clear_artwork = false;
   char wifi_text[48];
 
@@ -734,8 +799,12 @@ static void ui_update(void) {
   if (s_artwork_pending_ready) {
     pending_artwork = s_artwork_pending;
     pending_artwork_len = s_artwork_pending_len;
+    pending_artwork_width = s_artwork_pending_width;
+    pending_artwork_height = s_artwork_pending_height;
     s_artwork_pending = NULL;
     s_artwork_pending_len = 0;
+    s_artwork_pending_width = 0;
+    s_artwork_pending_height = 0;
     s_artwork_pending_ready = false;
   }
   STATE_UNLOCK();
@@ -757,6 +826,8 @@ static void ui_update(void) {
       if (!s_artwork_pending_ready) {
         s_artwork_pending = pending_artwork;
         s_artwork_pending_len = pending_artwork_len;
+        s_artwork_pending_width = pending_artwork_width;
+        s_artwork_pending_height = pending_artwork_height;
         s_artwork_pending_ready = true;
         pending_artwork = NULL;
       }
@@ -771,8 +842,9 @@ static void ui_update(void) {
   if (clear_artwork) {
     artwork_widget_clear();
   }
-  if (pending_artwork &&
-      !artwork_widget_set(pending_artwork, pending_artwork_len)) {
+  if (pending_artwork && !artwork_widget_set(
+                             pending_artwork, pending_artwork_len,
+                             pending_artwork_width, pending_artwork_height)) {
     heap_caps_free(pending_artwork);
   }
 
@@ -874,25 +946,8 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
   if (event == RTSP_EVENT_METADATA && data && data->metadata.has_artwork &&
       data->metadata.artwork_data && data->metadata.artwork_len > 0 &&
       data->metadata.artwork_format == RTSP_ARTWORK_JPEG) {
-    uint8_t *copy = heap_caps_malloc(data->metadata.artwork_len,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!copy) {
-      ESP_LOGW(TAG, "No PSRAM for %zu-byte artwork",
-               data->metadata.artwork_len);
-      return;
-    }
-    memcpy(copy, data->metadata.artwork_data, data->metadata.artwork_len);
-
-    STATE_LOCK();
-    uint8_t *old_pending = s_artwork_pending;
-    s_artwork_pending = copy;
-    s_artwork_pending_len = data->metadata.artwork_len;
-    s_artwork_pending_ready = true;
-    s_display.dirty = true;
-    STATE_UNLOCK();
-    if (old_pending) {
-      heap_caps_free(old_pending);
-    }
+    artwork_queue_jpeg(data->metadata.artwork_data,
+                       data->metadata.artwork_len);
     return;
   }
 #endif
@@ -909,8 +964,13 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
       s_artwork_pending = NULL;
     }
     s_artwork_pending_len = 0;
+    s_artwork_pending_width = 0;
+    s_artwork_pending_height = 0;
     s_artwork_pending_ready = false;
     s_artwork_clear_requested = true;
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+    ++s_artwork_generation;
+#endif
     s_display.state = DISPLAY_STATE_CONNECTED;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
@@ -940,8 +1000,13 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
       s_artwork_pending = NULL;
     }
     s_artwork_pending_len = 0;
+    s_artwork_pending_width = 0;
+    s_artwork_pending_height = 0;
     s_artwork_pending_ready = false;
     s_artwork_clear_requested = true;
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+    ++s_artwork_generation;
+#endif
     s_display.state = DISPLAY_STATE_STANDBY;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
@@ -956,6 +1021,21 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     if (data) {
       bool track_changed = data->metadata.title[0] &&
                            strcmp(data->metadata.title, s_display.title) != 0;
+
+      if (track_changed) {
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+        ++s_artwork_generation;
+#endif
+        if (s_artwork_pending) {
+          heap_caps_free(s_artwork_pending);
+          s_artwork_pending = NULL;
+        }
+        s_artwork_pending_len = 0;
+        s_artwork_pending_width = 0;
+        s_artwork_pending_height = 0;
+        s_artwork_pending_ready = false;
+        s_artwork_clear_requested = true;
+      }
 
       if (data->metadata.title[0]) {
         memcpy(s_display.title, data->metadata.title, METADATA_STRING_MAX);
@@ -1078,6 +1158,14 @@ static void display_task(void *pvParameters) {
 void display_init(void *bus) {
   s_state_mutex = xSemaphoreCreateMutex();
   assert(s_state_mutex != NULL);
+
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+  s_artwork_queue = xQueueCreate(1, sizeof(artwork_job_t));
+  assert(s_artwork_queue != NULL);
+  BaseType_t artwork_task_created = xTaskCreatePinnedToCore(
+      artwork_task, "artwork", 6144, NULL, 1, NULL, 0);
+  assert(artwork_task_created == pdPASS);
+#endif
 
   // The main/main.c contract (from PR #59) is:
   //   bus != NULL → a pre-initialised spi_host_device_t passed as
