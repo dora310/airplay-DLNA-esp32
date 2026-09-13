@@ -244,6 +244,10 @@ bool bplist_find_string_deep(const uint8_t *plist, size_t plist_len,
                              const char *key, char *out_str,
                              size_t out_capacity);
 
+/** Search nested dictionaries and arrays for a real or integer value. */
+bool bplist_find_real_deep(const uint8_t *plist, size_t plist_len,
+                           const char *key, double *out_value);
+
 // ========================================
 // Binary plist builders (for AirPlay SETUP responses)
 // ========================================
