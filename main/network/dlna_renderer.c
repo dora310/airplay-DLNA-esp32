@@ -1,6 +1,7 @@
 #include "dlna_renderer.h"
 
 #include "audio_output.h"
+#include "audio_resample.h"
 #include "display.h"
 #include "ethernet.h"
 #include "playback_control.h"
@@ -56,6 +57,8 @@ static volatile dlna_state_t s_state = DLNA_STATE_STOPPED;
 static volatile bool s_stop_requested;
 static volatile bool s_pause_requested;
 static volatile bool s_resume_fade_pending;
+static int16_t *s_resample_pcm;
+static size_t s_resample_capacity_frames;
 static volatile bool s_ssdp_running;
 static volatile bool s_airplay_active;
 static volatile bool s_ssdp_announce_pending;
@@ -380,6 +383,29 @@ static void pcm_apply_gain(int16_t *pcm, size_t samples) {
 static bool player_wait_if_paused(void);
 
 static esp_err_t write_stereo_block(int16_t *pcm, size_t frames) {
+  if (audio_resample_is_active()) {
+    size_t needed = audio_resample_max_output(frames) + 16;
+    if (needed > s_resample_capacity_frames) {
+      int16_t *larger =
+          realloc(s_resample_pcm, needed * 2 * sizeof(int16_t));
+      if (!larger) {
+        ESP_LOGE(TAG, "No memory for %u-frame DLNA resample buffer",
+                 (unsigned)needed);
+        return ESP_ERR_NO_MEM;
+      }
+      s_resample_pcm = larger;
+      s_resample_capacity_frames = needed;
+    }
+    size_t produced = audio_resample_process(
+        pcm, frames, s_resample_pcm, s_resample_capacity_frames);
+    if (produced == 0) {
+      /* A filter may retain a short initial block until it has enough input. */
+      return ESP_OK;
+    }
+    pcm = s_resample_pcm;
+    frames = produced;
+  }
+
   bool fade_out = s_pause_requested;
   bool fade_in = s_resume_fade_pending;
   esp_err_t err = audio_output_write_pcm_transition(
@@ -652,9 +678,23 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
           break;
         }
         if (!format_ready) {
-          audio_output_set_sample_rate(info.sample_rate);
-          ESP_LOGI(TAG, "DLNA %s: %lu Hz, %u channel", decoder_name(type),
-                   (unsigned long)info.sample_rate, info.channel);
+          /* Keep the DAC/I2S clock at the configured output rate. Dynamic I2S
+           * reconfiguration was not checked for failure and caused 48 kHz PCM
+           * to be clocked at 44.1 kHz (slow, low-pitched playback). Convert
+           * DLNA PCM to the stable hardware rate instead. */
+          audio_output_set_sample_rate(CONFIG_OUTPUT_SAMPLE_RATE_HZ);
+          if (!audio_resample_init(info.sample_rate,
+                                   CONFIG_OUTPUT_SAMPLE_RATE_HZ, 2)) {
+            ESP_LOGE(TAG, "Cannot resample DLNA %lu -> %u Hz",
+                     (unsigned long)info.sample_rate,
+                     (unsigned)CONFIG_OUTPUT_SAMPLE_RATE_HZ);
+            result = ESP_ERR_NO_MEM;
+            s_stop_requested = true;
+            break;
+          }
+          ESP_LOGI(TAG, "DLNA %s: %lu Hz, %u channel -> %u Hz I2S",
+                   decoder_name(type), (unsigned long)info.sample_rate,
+                   info.channel, (unsigned)CONFIG_OUTPUT_SAMPLE_RATE_HZ);
           format_ready = true;
         }
         result = write_pcm(out.buffer, out.decoded_size, info.channel);
@@ -706,6 +746,10 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
 
 static void restore_airplay_output(void) {
   audio_output_set_sample_rate(CONFIG_OUTPUT_SAMPLE_RATE_HZ);
+  /* DLNA temporarily owns the shared resampler while the AirPlay writer task
+   * is stopped. Restore AirPlay's native input-rate configuration before that
+   * task is started again. */
+  audio_resample_init(44100, CONFIG_OUTPUT_SAMPLE_RATE_HZ, 2);
   audio_output_start();
   playback_control_set_source(PLAYBACK_SOURCE_AIRPLAY);
 }
@@ -773,6 +817,9 @@ static void player_task(void *arg) {
     esp_http_client_cleanup(client);
   }
   free(input);
+  free(s_resample_pcm);
+  s_resample_pcm = NULL;
+  s_resample_capacity_frames = 0;
 
   s_state = DLNA_STATE_STOPPED;
   s_stop_requested = false;
