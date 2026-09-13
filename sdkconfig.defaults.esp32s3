@@ -70,11 +70,12 @@ CONFIG_LV_TXT_ENC_UTF8=y
 CONFIG_LV_USE_BIDI=y
 CONFIG_LV_BIDI_DIR_AUTO=y
 CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=y
-# JPEG artwork is temporarily disabled. Direct LVGL JPEG rendering caused a
-# moving white rectangle on the GMT020-02/ST7789 panel. Text metadata,
-# multilingual glyphs and playback progress remain enabled.
+# R33 uses a private bounded TJpgDec worker to produce RGB565 before LVGL sees
+# the image. Keep LVGL's direct JPEG decoder disabled: it was responsible for
+# the moving white rectangle and unsafe compressed-buffer lifetime.
 # CONFIG_LV_USE_TJPGD is not set
-# CONFIG_ENABLE_AIRPLAY_ARTWORK is not set
+CONFIG_ENABLE_AIRPLAY_ARTWORK=y
+CONFIG_AIRPLAY_ARTWORK_MAX_KB=256
 #
 # See components/display/README.md for full setup instructions.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
