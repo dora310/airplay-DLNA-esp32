@@ -239,7 +239,13 @@ static uint8_t *s_artwork_active = NULL;
 static lv_image_dsc_t s_artwork_dsc;
 
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
-#define ARTWORK_DECODE_MAX_DIM 224
+/* Decode directly to the size of the on-screen artwork slot.  Decoding to
+ * 224 and asking LVGL to scale the image to 112 left the LVGL object at its
+ * original 224-pixel bounds.  Because image scaling uses the object's centre
+ * as its pivot, the visible cover was shifted right and down by roughly 56
+ * pixels.  A slot-sized buffer needs no transform, so its object coordinates
+ * and visible pixels always agree. */
+#define ARTWORK_DECODE_MAX_DIM ARTWORK_SIZE
 
 typedef struct {
   uint8_t *jpeg;
