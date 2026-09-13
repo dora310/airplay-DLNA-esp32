@@ -1585,8 +1585,9 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
       rtsp_events_emit(RTSP_EVENT_METADATA, &artwork_event);
     }
 #else
-    // Artwork reception disabled — ignore it.  The md txt record already asks
-    // senders not to transmit cover art, but some send it regardless.
+    // Artwork rendering is disabled — accept the protocol request but discard
+    // its body. Advertising artwork is retained because some Apple Music
+    // sessions send title/artist/album only with the complete metadata bundle.
     ESP_LOGD(TAG, "Ignoring artwork (%s, %zu bytes): disabled in config",
              req->content_type, body_len);
 #endif
