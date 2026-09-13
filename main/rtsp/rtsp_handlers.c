@@ -1489,6 +1489,17 @@ static void parse_progress(const char *progress_str, uint32_t sample_rate,
   }
 }
 
+static bool find_metadata_string(const uint8_t *plist, size_t plist_len,
+                                 const char *const *keys, size_t key_count,
+                                 char *out, size_t out_size) {
+  for (size_t i = 0; i < key_count; i++) {
+    if (bplist_find_string_deep(plist, plist_len, keys[i], out, out_size)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void handle_set_parameter(int socket, rtsp_conn_t *conn,
                                  const rtsp_request_t *req, const uint8_t *raw,
                                  size_t raw_len) {
@@ -1575,20 +1586,29 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
       }
       // Try to extract metadata from bplist (AirPlay 2)
       char str_val[METADATA_STRING_MAX];
-      if (bplist_find_string(body, body_len, "itemName", str_val,
-                             sizeof(str_val))) {
+      static const char *const title_keys[] = {
+          "itemName", "title", "kMRMediaRemoteNowPlayingInfoTitle"};
+      static const char *const artist_keys[] = {
+          "artistName", "artist", "kMRMediaRemoteNowPlayingInfoArtist"};
+      static const char *const album_keys[] = {
+          "albumName", "album", "kMRMediaRemoteNowPlayingInfoAlbum"};
+      if (find_metadata_string(body, body_len, title_keys,
+                               sizeof(title_keys) / sizeof(title_keys[0]),
+                               str_val, sizeof(str_val))) {
         ESP_LOGI(TAG, "Metadata: Title = %s", str_val);
         strlcpy(event_data.metadata.title, str_val, METADATA_STRING_MAX);
         has_metadata = true;
       }
-      if (bplist_find_string(body, body_len, "artistName", str_val,
-                             sizeof(str_val))) {
+      if (find_metadata_string(body, body_len, artist_keys,
+                               sizeof(artist_keys) / sizeof(artist_keys[0]),
+                               str_val, sizeof(str_val))) {
         ESP_LOGI(TAG, "Metadata: Artist = %s", str_val);
         strlcpy(event_data.metadata.artist, str_val, METADATA_STRING_MAX);
         has_metadata = true;
       }
-      if (bplist_find_string(body, body_len, "albumName", str_val,
-                             sizeof(str_val))) {
+      if (find_metadata_string(body, body_len, album_keys,
+                               sizeof(album_keys) / sizeof(album_keys[0]),
+                               str_val, sizeof(str_val))) {
         ESP_LOGI(TAG, "Metadata: Album = %s", str_val);
         strlcpy(event_data.metadata.album, str_val, METADATA_STRING_MAX);
         has_metadata = true;
