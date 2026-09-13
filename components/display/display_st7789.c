@@ -38,11 +38,26 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lvgl.h"
+#include "misc/cache/instance/lv_image_cache.h"
 
 #include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "display_st7789";
+
+// Generated 16 px UTF-8 font containing Latin/Spanish, Persian/Arabic and
+// common Japanese glyphs. LVGL's bidi and Arabic/Persian shaping options are
+// enabled by sdkconfig.defaults.esp32s3.
+LV_FONT_DECLARE(lv_font_international_16);
+
+// Fail the build instead of silently drawing missing/broken international
+// glyphs if the required LVGL options are lost from sdkconfig defaults.
+#if !LV_USE_FONT_COMPRESSED
+#error "lv_font_international_16 requires LV_USE_FONT_COMPRESSED=1"
+#endif
+#if LV_TXT_ENC != LV_TXT_ENC_UTF8
+#error "The ST7789 metadata display requires LV_TXT_ENC_UTF8"
+#endif
 
 // ============================================================================
 // Hardware configuration
@@ -80,6 +95,11 @@ static const char *TAG = "display_st7789";
 #define Y_TIME       51
 #define Y_STATUS     0
 #define BAR_HEIGHT   6
+#define ARTWORK_SIZE 48
+#define ARTWORK_X    4
+#define ARTWORK_Y    4
+#define TEXT_X       X_MARGIN
+#define TEXT_RIGHT   X_MARGIN
 #else
 #define X_MARGIN   22
 #define X_MARGIN_R (-22)
@@ -92,6 +112,11 @@ static const char *TAG = "display_st7789";
 #define Y_TIME     (Y_PROGRESS + 18)
 #define Y_STATUS   ((DISPLAY_HEIGHT >= 220) ? 188 : (DISPLAY_HEIGHT - 18))
 #define BAR_HEIGHT 12
+#define ARTWORK_SIZE 112
+#define ARTWORK_X    10
+#define ARTWORK_Y    10
+#define TEXT_X       X_MARGIN
+#define TEXT_RIGHT   X_MARGIN
 #endif
 
 // ============================================================================
@@ -144,6 +169,18 @@ static lv_obj_t *s_label_time_elapsed = NULL;
 static lv_obj_t *s_label_time_remaining = NULL;
 static lv_obj_t *s_label_battery = NULL;
 static lv_obj_t *s_label_volume = NULL;
+static lv_obj_t *s_artwork_image = NULL;
+static lv_obj_t *s_artwork_placeholder = NULL;
+
+// Compressed JPEG ownership is transferred from the RTSP callback to the
+// display task. Both pending fields are protected by s_state_mutex. Active
+// fields are touched only while the LVGL lock is held.
+static uint8_t *s_artwork_pending = NULL;
+static size_t s_artwork_pending_len = 0;
+static bool s_artwork_pending_ready = false;
+static bool s_artwork_clear_requested = false;
+static uint8_t *s_artwork_active = NULL;
+static lv_image_dsc_t s_artwork_dsc;
 
 // ============================================================================
 // Background loading
@@ -222,6 +259,118 @@ static void format_remaining(uint32_t remaining_secs, char *buf, size_t len) {
   snprintf(buf, len, "-%lu:%02lu", remaining_secs / 60, remaining_secs % 60);
 }
 
+static bool jpeg_get_dimensions(const uint8_t *data, size_t len,
+                                uint16_t *width, uint16_t *height) {
+  if (!data || len < 4 || data[0] != 0xff || data[1] != 0xd8) {
+    return false;
+  }
+
+  size_t pos = 2;
+  while (pos + 4 <= len) {
+    while (pos < len && data[pos] != 0xff) {
+      pos++;
+    }
+    while (pos < len && data[pos] == 0xff) {
+      pos++;
+    }
+    if (pos >= len) {
+      break;
+    }
+
+    uint8_t marker = data[pos++];
+    if (marker == 0xd8 || marker == 0xd9 || marker == 0x01 ||
+        (marker >= 0xd0 && marker <= 0xd7)) {
+      continue;
+    }
+    if (pos + 2 > len) {
+      break;
+    }
+
+    size_t segment_len = ((size_t)data[pos] << 8) | data[pos + 1];
+    if (segment_len < 2 || pos + segment_len > len) {
+      break;
+    }
+
+    bool is_sof = (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 &&
+                   marker != 0xc8 && marker != 0xcc);
+    if (is_sof && segment_len >= 7) {
+      *height = (uint16_t)(((uint16_t)data[pos + 3] << 8) | data[pos + 4]);
+      *width = (uint16_t)(((uint16_t)data[pos + 5] << 8) | data[pos + 6]);
+      return *width > 0 && *height > 0;
+    }
+    pos += segment_len;
+  }
+  return false;
+}
+
+// Must be called with the LVGL lock held. Takes ownership of jpeg_data when
+// successful; on failure the caller remains responsible for freeing it.
+static bool artwork_widget_set(uint8_t *jpeg_data, size_t jpeg_len) {
+  if (!s_artwork_placeholder) {
+    return false;
+  }
+
+  uint16_t width = 0, height = 0;
+  if (!jpeg_get_dimensions(jpeg_data, jpeg_len, &width, &height)) {
+    ESP_LOGW(TAG, "Rejected artwork with invalid JPEG dimensions");
+    return false;
+  }
+
+  if (s_artwork_image) {
+    lv_obj_delete(s_artwork_image);
+    s_artwork_image = NULL;
+  }
+  if (s_artwork_active) {
+    lv_image_cache_drop(&s_artwork_dsc);
+    heap_caps_free(s_artwork_active);
+    s_artwork_active = NULL;
+  }
+
+  memset(&s_artwork_dsc, 0, sizeof(s_artwork_dsc));
+  s_artwork_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+  s_artwork_dsc.header.cf = LV_COLOR_FORMAT_RAW;
+  s_artwork_dsc.header.w = width;
+  s_artwork_dsc.header.h = height;
+  s_artwork_dsc.data_size = jpeg_len;
+  s_artwork_dsc.data = jpeg_data;
+
+  s_artwork_image = lv_image_create(lv_screen_active());
+  lv_image_set_src(s_artwork_image, &s_artwork_dsc);
+  uint16_t longest = width > height ? width : height;
+  uint32_t scale = ((uint32_t)ARTWORK_SIZE * 256U) / longest;
+  if (scale > 256U) {
+    scale = 256U; // Do not enlarge small covers.
+  }
+  if (scale == 0) {
+    scale = 1;
+  }
+  lv_image_set_scale(s_artwork_image, scale);
+  lv_obj_align(s_artwork_image, LV_ALIGN_TOP_LEFT, ARTWORK_X, ARTWORK_Y);
+  lv_obj_t *parent = lv_obj_get_parent(s_artwork_image);
+  lv_obj_move_to_index(s_artwork_image, lv_obj_get_child_count(parent) - 1);
+  lv_obj_add_flag(s_artwork_placeholder, LV_OBJ_FLAG_HIDDEN);
+  s_artwork_active = jpeg_data;
+  ESP_LOGI(TAG, "Displaying JPEG artwork: %ux%u, %zu bytes", width, height,
+           jpeg_len);
+  return true;
+}
+
+// Must be called with the LVGL lock held.
+static void artwork_widget_clear(void) {
+  if (s_artwork_image) {
+    lv_obj_delete(s_artwork_image);
+    s_artwork_image = NULL;
+  }
+  if (s_artwork_active) {
+    lv_image_cache_drop(&s_artwork_dsc);
+    heap_caps_free(s_artwork_active);
+    s_artwork_active = NULL;
+  }
+  if (s_artwork_placeholder) {
+    lv_obj_clear_flag(s_artwork_placeholder, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 // ============================================================================
 // UI creation - called once after LVGL init, with lock held
 // ============================================================================
@@ -243,6 +392,30 @@ static void ui_create(void) {
     lv_obj_align(bg, LV_ALIGN_TOP_LEFT, 0, 0);
   }
 
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+  // Album-art area. This is compiled only when JPEG artwork is explicitly
+  // enabled. It is disabled in R24 because direct compressed-JPEG rendering
+  // produced a moving white rectangle on this ST7789/LVGL combination.
+  s_artwork_placeholder = lv_obj_create(scr);
+  lv_obj_set_size(s_artwork_placeholder, ARTWORK_SIZE, ARTWORK_SIZE);
+  lv_obj_align(s_artwork_placeholder, LV_ALIGN_TOP_LEFT, ARTWORK_X, ARTWORK_Y);
+  lv_obj_set_style_bg_color(s_artwork_placeholder, lv_color_make(18, 18, 28),
+                            0);
+  lv_obj_set_style_bg_opa(s_artwork_placeholder, LV_OPA_80, 0);
+  lv_obj_set_style_border_color(s_artwork_placeholder,
+                                lv_color_make(55, 55, 75), 0);
+  lv_obj_set_style_border_width(s_artwork_placeholder, 1, 0);
+  lv_obj_set_style_radius(s_artwork_placeholder, 8, 0);
+  lv_obj_clear_flag(s_artwork_placeholder, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *artwork_text = lv_label_create(s_artwork_placeholder);
+  lv_label_set_text(artwork_text, DISPLAY_COMPACT_STRIP ? "ART" : "ALBUM\nART");
+  lv_obj_set_style_text_align(artwork_text, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(artwork_text, lv_color_make(100, 105, 125), 0);
+  lv_obj_set_style_text_font(artwork_text, &lv_font_montserrat_14, 0);
+  lv_obj_center(artwork_text);
+#endif
+
   // Muted indicator — top-right corner, red, hidden by default
   s_label_muted = lv_label_create(scr);
   lv_obj_set_style_text_font(s_label_muted, &lv_font_montserrat_14, 0);
@@ -251,43 +424,39 @@ static void ui_create(void) {
   lv_obj_add_flag(s_label_muted, LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text(s_label_muted, "MUTED");
 
-  // Title — largest font, white, scrolling
-  const lv_font_t *title_font =
-      DISPLAY_COMPACT_STRIP
-          ? &lv_font_montserrat_16
-          : ((DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14
-                                     : &lv_font_montserrat_24);
-  const lv_font_t *artist_font =
-      DISPLAY_COMPACT_STRIP
-          ? &lv_font_montserrat_14
-          : ((DISPLAY_HEIGHT >= 220) ? &lv_font_montserrat_14
-                                     : &lv_font_montserrat_16);
+  // Metadata uses the international font. LV_BASE_DIR_AUTO enables Persian
+  // right-to-left layout while Latin and Japanese remain left-to-right.
   s_label_title = lv_label_create(scr);
   lv_obj_set_width(s_label_title,
-                   DISPLAY_WIDTH - (X_MARGIN * 2) -
-                       (DISPLAY_COMPACT_STRIP ? 58 : 0));
+                   DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT -
+                       (DISPLAY_COMPACT_STRIP ? 0 : 55));
   lv_label_set_long_mode(s_label_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_style_text_font(s_label_title, title_font, 0);
+  lv_obj_set_style_text_font(s_label_title, &lv_font_international_16, 0);
+  lv_obj_set_style_base_dir(s_label_title, LV_BASE_DIR_AUTO, 0);
   lv_obj_set_style_text_color(s_label_title, lv_color_white(), 0);
-  lv_obj_align(s_label_title, LV_ALIGN_TOP_LEFT, X_MARGIN, Y_TITLE);
+  lv_obj_align(s_label_title, LV_ALIGN_TOP_LEFT, TEXT_X, Y_TITLE);
   lv_label_set_text(s_label_title, "AirPlay Ready");
 
   // Artist — medium font, light grey, scrolling
   s_label_artist = lv_label_create(scr);
-  lv_obj_set_width(s_label_artist, DISPLAY_WIDTH - (X_MARGIN * 2));
+  lv_obj_set_width(s_label_artist, DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT);
   lv_label_set_long_mode(s_label_artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_style_text_font(s_label_artist, artist_font, 0);
+  lv_obj_set_style_text_font(s_label_artist, &lv_font_international_16, 0);
+  lv_obj_set_style_base_dir(s_label_artist, LV_BASE_DIR_AUTO, 0);
   lv_obj_set_style_text_color(s_label_artist, lv_color_make(180, 180, 180), 0);
-  lv_obj_align(s_label_artist, LV_ALIGN_TOP_LEFT, X_MARGIN, Y_ARTIST);
+  lv_obj_align(s_label_artist, LV_ALIGN_TOP_LEFT, TEXT_X, Y_ARTIST);
   lv_label_set_text(s_label_artist, "");
 
   // Album — small font, dimmer grey, scrolling
   s_label_album = lv_label_create(scr);
-  lv_obj_set_width(s_label_album, DISPLAY_WIDTH - (X_MARGIN * 2) - 60);
+  lv_obj_set_width(s_label_album,
+                   DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT -
+                       (DISPLAY_COMPACT_STRIP ? 0 : 70));
   lv_label_set_long_mode(s_label_album, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_style_text_font(s_label_album, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(s_label_album, &lv_font_international_16, 0);
+  lv_obj_set_style_base_dir(s_label_album, LV_BASE_DIR_AUTO, 0);
   lv_obj_set_style_text_color(s_label_album, lv_color_make(140, 140, 140), 0);
-  lv_obj_align(s_label_album, LV_ALIGN_TOP_LEFT, X_MARGIN, Y_ALBUM);
+  lv_obj_align(s_label_album, LV_ALIGN_TOP_LEFT, TEXT_X, Y_ALBUM);
   lv_label_set_text(s_label_album, "");
   if (DISPLAY_COMPACT_STRIP) {
     lv_obj_add_flag(s_label_album, LV_OBJ_FLAG_HIDDEN);
@@ -423,6 +592,9 @@ static void ui_update(void) {
   uint32_t position_secs;
   int64_t sync_time_us;
   display_state_t state;
+  uint8_t *pending_artwork = NULL;
+  size_t pending_artwork_len = 0;
+  bool clear_artwork = false;
 
   STATE_LOCK();
   memcpy(title, s_display.title, sizeof(title));
@@ -432,6 +604,15 @@ static void ui_update(void) {
   position_secs = s_display.position_secs;
   sync_time_us = s_display.sync_time_us;
   state = s_display.state;
+  clear_artwork = s_artwork_clear_requested;
+  s_artwork_clear_requested = false;
+  if (s_artwork_pending_ready) {
+    pending_artwork = s_artwork_pending;
+    pending_artwork_len = s_artwork_pending_len;
+    s_artwork_pending = NULL;
+    s_artwork_pending_len = 0;
+    s_artwork_pending_ready = false;
+  }
   STATE_UNLOCK();
 
   // Defensive NUL termination — if the RTSP producer ever fills all
@@ -443,7 +624,31 @@ static void ui_update(void) {
 
   if (!lvgl_port_lock(100)) {
     ESP_LOGW(TAG, "ui_update: lock timeout");
+    // Return ownership to the pending slot so a temporary LVGL lock timeout
+    // cannot lose the cover image.
+    STATE_LOCK();
+    s_artwork_clear_requested |= clear_artwork;
+    if (pending_artwork) {
+      if (!s_artwork_pending_ready) {
+        s_artwork_pending = pending_artwork;
+        s_artwork_pending_len = pending_artwork_len;
+        s_artwork_pending_ready = true;
+        pending_artwork = NULL;
+      }
+    }
+    STATE_UNLOCK();
+    if (pending_artwork) {
+      heap_caps_free(pending_artwork);
+    }
     return;
+  }
+
+  if (clear_artwork) {
+    artwork_widget_clear();
+  }
+  if (pending_artwork &&
+      !artwork_widget_set(pending_artwork, pending_artwork_len)) {
+    heap_caps_free(pending_artwork);
   }
 
   switch (state) {
@@ -459,9 +664,12 @@ static void ui_update(void) {
     break;
 
   case DISPLAY_STATE_CONNECTED:
-    lv_label_set_text(s_label_title, "Connected");
-    lv_label_set_text(s_label_artist, "");
-    lv_label_set_text(s_label_album, "");
+    // Metadata can arrive before RECORD/SETRATEANCHORTIME changes the state
+    // to PLAYING. Render it immediately instead of hiding it behind the fixed
+    // Connected/Ready message.
+    lv_label_set_text(s_label_title, title[0] ? title : "Connected");
+    lv_label_set_text(s_label_artist, artist[0] ? artist : "");
+    lv_label_set_text(s_label_album, album[0] ? album : "");
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
@@ -528,6 +736,33 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
                           void *user_data) {
   (void)user_data;
 
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+  if (event == RTSP_EVENT_METADATA && data && data->metadata.has_artwork &&
+      data->metadata.artwork_data && data->metadata.artwork_len > 0 &&
+      data->metadata.artwork_format == RTSP_ARTWORK_JPEG) {
+    uint8_t *copy = heap_caps_malloc(data->metadata.artwork_len,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) {
+      ESP_LOGW(TAG, "No PSRAM for %zu-byte artwork",
+               data->metadata.artwork_len);
+      return;
+    }
+    memcpy(copy, data->metadata.artwork_data, data->metadata.artwork_len);
+
+    STATE_LOCK();
+    uint8_t *old_pending = s_artwork_pending;
+    s_artwork_pending = copy;
+    s_artwork_pending_len = data->metadata.artwork_len;
+    s_artwork_pending_ready = true;
+    s_display.dirty = true;
+    STATE_UNLOCK();
+    if (old_pending) {
+      heap_caps_free(old_pending);
+    }
+    return;
+  }
+#endif
+
   // All mutations of s_display happen under the state mutex so reads in
   // display_task see a consistent snapshot. The callback runs in the RTSP
   // event thread (not an ISR), so blocking on a FreeRTOS mutex is safe.
@@ -535,6 +770,13 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
 
   switch (event) {
   case RTSP_EVENT_CLIENT_CONNECTED:
+    if (s_artwork_pending) {
+      heap_caps_free(s_artwork_pending);
+      s_artwork_pending = NULL;
+    }
+    s_artwork_pending_len = 0;
+    s_artwork_pending_ready = false;
+    s_artwork_clear_requested = true;
     s_display.state = DISPLAY_STATE_CONNECTED;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
@@ -559,6 +801,13 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     break;
 
   case RTSP_EVENT_DISCONNECTED:
+    if (s_artwork_pending) {
+      heap_caps_free(s_artwork_pending);
+      s_artwork_pending = NULL;
+    }
+    s_artwork_pending_len = 0;
+    s_artwork_pending_ready = false;
+    s_artwork_clear_requested = true;
     s_display.state = DISPLAY_STATE_STANDBY;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
@@ -599,6 +848,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
       s_display.dirty = true;
     }
     break;
+
   }
 
   STATE_UNLOCK();
@@ -717,7 +967,8 @@ void display_init(void *bus) {
   // which matches the Kconfig default. BIT64(-1) is undefined, and
   // gpio_set_level(-1, ...) returns ESP_ERR_INVALID_ARG, so skip the config
   // entirely when the pin is not set.
-  if (CONFIG_DISPLAY_BL_GPIO >= 0) {
+#if CONFIG_DISPLAY_BL_GPIO >= 0
+  {
     gpio_config_t bl_cfg = {
         .pin_bit_mask = BIT64(CONFIG_DISPLAY_BL_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -725,6 +976,7 @@ void display_init(void *bus) {
     ESP_ERROR_CHECK(gpio_config(&bl_cfg));
     gpio_set_level(CONFIG_DISPLAY_BL_GPIO, 0);
   }
+#endif
 
   bg_load_from_spiffs();
 
@@ -832,14 +1084,20 @@ void display_init(void *bus) {
     abort();
   }
 
-  if (CONFIG_DISPLAY_BL_GPIO >= 0) {
+#if CONFIG_DISPLAY_BL_GPIO >= 0
+  {
     gpio_set_level(CONFIG_DISPLAY_BL_GPIO, 1);
   }
+#endif
 
   s_display.state = DISPLAY_STATE_STANDBY;
   s_display.dirty = true;
 
-  rtsp_events_register(on_rtsp_event, NULL);
+  if (rtsp_events_register(on_rtsp_event, NULL) != 0) {
+    ESP_LOGE(TAG, "Could not register RTSP metadata listener");
+  } else {
+    ESP_LOGI(TAG, "RTSP metadata listener registered");
+  }
 
   // Pinned to Core 0 — audio runs on Core 1
   xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 3, NULL, 0);
