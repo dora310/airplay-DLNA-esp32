@@ -619,9 +619,9 @@ static void ui_create(void) {
   // Metadata uses the international font. LV_BASE_DIR_AUTO enables Persian
   // right-to-left layout while Latin and Japanese remain left-to-right.
   s_label_title = lv_label_create(scr);
-  lv_obj_set_width(s_label_title,
-                   DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT -
-                       (DISPLAY_COMPACT_STRIP ? 0 : 55));
+  /* Give title the same right edge as artist.  The former 55-pixel reserve
+   * unnecessarily shortened the first metadata line. */
+  lv_obj_set_width(s_label_title, DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT);
   lv_label_set_long_mode(s_label_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
   lv_obj_set_style_text_font(s_label_title, &lv_font_international_16, 0);
   lv_obj_set_style_base_dir(s_label_title, LV_BASE_DIR_AUTO, 0);
@@ -641,9 +641,9 @@ static void ui_create(void) {
 
   // Album — small font, dimmer grey, scrolling
   s_label_album = lv_label_create(scr);
-  lv_obj_set_width(s_label_album,
-                   DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT -
-                       (DISPLAY_COMPACT_STRIP ? 0 : 70));
+  /* Match title/artist width; status now lives on the lower status row and
+   * does not require the old 70-pixel reservation beside the album. */
+  lv_obj_set_width(s_label_album, DISPLAY_WIDTH - TEXT_X - TEXT_RIGHT);
   lv_label_set_long_mode(s_label_album, LV_LABEL_LONG_SCROLL_CIRCULAR);
   lv_obj_set_style_text_font(s_label_album, &lv_font_international_16, 0);
   lv_obj_set_style_base_dir(s_label_album, LV_BASE_DIR_AUTO, 0);
