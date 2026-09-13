@@ -1084,7 +1084,11 @@ void display_init(void *bus) {
   s_display.state = DISPLAY_STATE_STANDBY;
   s_display.dirty = true;
 
-  rtsp_events_register(on_rtsp_event, NULL);
+  if (rtsp_events_register(on_rtsp_event, NULL) != 0) {
+    ESP_LOGE(TAG, "Could not register RTSP metadata listener");
+  } else {
+    ESP_LOGI(TAG, "RTSP metadata listener registered");
+  }
 
   // Pinned to Core 0 — audio runs on Core 1
   xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 3, NULL, 0);
