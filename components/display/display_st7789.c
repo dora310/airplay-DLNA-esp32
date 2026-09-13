@@ -1241,7 +1241,9 @@ void display_init(void *bus) {
   esp_lcd_panel_handle_t panel_handle = NULL;
   esp_lcd_panel_dev_config_t panel_cfg = {
       .reset_gpio_num = CONFIG_DISPLAY_SPI_RST,
-      .rgb_endian = LCD_RGB_ENDIAN_RGB,
+      /* GMT020-02/ST7789V glass uses BGR sub-pixel order. Selecting RGB makes
+       * every red value appear blue in both LVGL themes and album artwork. */
+      .rgb_endian = LCD_RGB_ENDIAN_BGR,
       .bits_per_pixel = 16,
   };
   ESP_ERROR_CHECK(
