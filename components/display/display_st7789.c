@@ -3,7 +3,7 @@
  * @brief ST7789 TFT display driver using esp_lcd + LVGL 9 (esp_lvgl_port)
  *
  * Implements the display_init() API for ST7789-based TFT displays.
- * Display: 320x170 pixels, landscape orientation, SPI interface.
+ * Display: GMT020-02 ST7789V, 240x320 native / 320x240 landscape, SPI.
  *
  * Background image is loaded at startup from SPIFFS (/spiffs/bg/background.bin)
  * — a raw RGB565 little-endian binary file. If the file is absent, the display
@@ -16,7 +16,7 @@
  *   CS   -> CONFIG_DISPLAY_SPI_CS   (default 15)
  *   DC   -> CONFIG_DISPLAY_SPI_DC   (default 16)
  *   RST  -> CONFIG_DISPLAY_SPI_RST  (default 21)
- *   BL   -> CONFIG_DISPLAY_BL_GPIO  (default 38)
+ *   BL   -> not present on GMT020-02; CONFIG_DISPLAY_BL_GPIO must be -1
  */
 
 #include "display.h"
@@ -51,11 +51,10 @@ static const char *TAG = "display_st7789";
 #define DISPLAY_WIDTH      CONFIG_DISPLAY_ST7789_WIDTH
 #define DISPLAY_HEIGHT     CONFIG_DISPLAY_ST7789_HEIGHT
 #define LCD_HOST           SPI2_HOST
-/* Long jumper wires and low-cost 2.25-inch breakout boards are more reliable
- * at 20 MHz. Larger integrated ST7789 boards retain the original 40 MHz. */
-#define LCD_PIXEL_CLOCK_HZ                                                   \
-  ((CONFIG_DISPLAY_ST7789_HEIGHT <= 100) ? (20 * 1000 * 1000)               \
-                                          : (40 * 1000 * 1000))
+/* The GMT020-02 breakout can remain blank at 40 MHz with Dupont leads.
+ * Start at a conservative 10 MHz. This is still fast enough for the
+ * now-playing interface and leaves substantial margin for wiring quality. */
+#define LCD_PIXEL_CLOCK_HZ (10 * 1000 * 1000)
 #define DRAW_BUF_LINES     10
 
 // Background image path on SPIFFS
@@ -230,10 +229,9 @@ static void format_remaining(uint32_t remaining_secs, char *buf, size_t len) {
 static void ui_create(void) {
   lv_obj_t *scr = lv_screen_active();
 
-  // Always set a solid black background — ensures a clean screen whether or
-  // not a background image was loaded from SPIFFS. Without this, LVGL's
-  // default theme leaves the screen white with unrendered display RAM noise.
-  lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+  // A dark-blue background makes the first successful panel refresh obvious.
+  // It also remains readable when no optional background image is installed.
+  lv_obj_set_style_bg_color(scr, lv_color_make(3, 16, 38), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
   // Background image — loaded from SPIFFS at display_init() time.
@@ -731,10 +729,16 @@ void display_init(void *bus) {
   };
   ESP_ERROR_CHECK(
       esp_lcd_new_panel_st7789(io_handle, &panel_cfg, &panel_handle));
+  ESP_LOGI(TAG, "ST7789 panel handle created; resetting controller");
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+  vTaskDelay(pdMS_TO_TICKS(120));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+  vTaskDelay(pdMS_TO_TICKS(120));
   ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+  vTaskDelay(pdMS_TO_TICKS(100));
+  ESP_LOGI(TAG, "ST7789 controller initialized at %d MHz",
+           LCD_PIXEL_CLOCK_HZ / 1000000);
 
   // Pin the LVGL task to Core 0. Default task_affinity=-1 allows migration
   // to Core 1 where it interferes with the audio task (priority 7).
@@ -784,6 +788,9 @@ void display_init(void *bus) {
   // state by calling ui_create() unlocked.
   if (lvgl_port_lock(1000)) {
     ui_create();
+    /* Do not wait for the periodic LVGL timer for the first transfer. This
+     * immediately sends the dark-blue startup screen and the Ready labels. */
+    lv_refr_now(s_lvgl_disp);
     lvgl_port_unlock();
   } else {
     ESP_LOGE(TAG, "Failed to acquire LVGL lock during init — UI not built");
