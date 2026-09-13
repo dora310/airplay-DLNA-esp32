@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /**
@@ -19,6 +20,17 @@ void rtsp_server_stop(void);
  * @param volume_db Volume in dB (0 = max, -144 = mute)
  */
 void airplay_set_volume(float volume_db);
+
+/**
+ * Apply or remove a software mute at the final AirPlay PCM output.
+ *
+ * This does not change the saved volume. It is required for I2S-only DACs
+ * such as PCM5102A, where dac_set_volume() is intentionally a no-op.
+ */
+void airplay_set_output_muted(bool muted);
+
+/** Return true while the final AirPlay PCM output is software-muted. */
+bool airplay_output_is_muted(void);
 
 /**
  * Get current volume as Q15 scale factor for audio processing

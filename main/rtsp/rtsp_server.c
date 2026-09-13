@@ -56,6 +56,10 @@ static int current_slot = 0;
 // Flag set by the play/pause button to tell the grace period loop
 // to send a DACP resume command and keep waiting for reconnect.
 static volatile bool s_resume_requested = false;
+// PCM5102A has no volume-control register. Keep mute as a non-persistent
+// software gate in the final Q15 gain path instead of calling an absent DAC
+// driver or overwriting the user's saved volume with -30 dB.
+static volatile bool s_output_muted = false;
 
 // Public API for volume control
 void airplay_set_volume(float volume_db) {
@@ -65,7 +69,14 @@ void airplay_set_volume(float volume_db) {
   }
 }
 
+void airplay_set_output_muted(bool muted) { s_output_muted = muted; }
+
+bool airplay_output_is_muted(void) { return s_output_muted; }
+
 int32_t airplay_get_volume_q15(void) {
+  if (s_output_muted) {
+    return 0;
+  }
   client_slot_t *c = &clients[current_slot];
   if (c->conn && !c->is_old) {
     return rtsp_conn_get_volume_q15(c->conn);
