@@ -30,7 +30,7 @@
 #include <strings.h>
 
 #define DLNA_SOAP_BODY_MAX      8192
-#define DLNA_INPUT_BUFFER_SIZE  4096
+#define DLNA_INPUT_BUFFER_SIZE  16384
 #define DLNA_OUTPUT_BUFFER_SIZE 8192
 #define DLNA_SSDP_PORT          1900
 #define DLNA_NOTIFY_SECONDS     900
@@ -581,11 +581,15 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       break;
     }
 
-    if (input_len == 0 && !eof) {
-      int n = esp_http_client_read(client, (char *)input,
-                                   DLNA_INPUT_BUFFER_SIZE);
+    /* Keep any compressed bytes which the decoder did not consume and append
+     * the next HTTP block after them.  MP3/AAC/FLAC frames commonly cross TCP
+     * read boundaries; discarding this tail creates an audible discontinuity
+     * on every affected boundary. */
+    if (!eof && input_len < DLNA_INPUT_BUFFER_SIZE) {
+      int n = esp_http_client_read(client, (char *)input + input_len,
+                                   DLNA_INPUT_BUFFER_SIZE - input_len);
       if (n > 0) {
-        input_len = (size_t)n;
+        input_len += (size_t)n;
       } else if (n == 0) {
         eof = true;
       } else if (s_stop_requested) {
@@ -605,12 +609,17 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
         .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
     };
     bool process_once = true;
+    bool made_progress = false;
     while (!s_stop_requested && (raw.len > 0 || (eof && process_once))) {
       esp_audio_simple_dec_out_t out = {
           .buffer = output,
           .len = output_capacity,
       };
       uint32_t before = raw.len;
+      /* consumed is an output for this individual decoder call.  Clear it so
+       * a decoder requesting more input cannot leave the previous call's
+       * value behind and accidentally skip compressed bytes. */
+      raw.consumed = 0;
       esp_audio_err_t dec_err =
           esp_audio_simple_dec_process(decoder, &raw, &out);
       if (dec_err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
@@ -663,12 +672,29 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       raw.buffer += raw.consumed;
       raw.len -= raw.consumed;
       process_once = false;
+      if (before != raw.len || out.decoded_size != 0) {
+        made_progress = true;
+      }
       if (before == raw.len && out.decoded_size == 0) {
         break;
       }
     }
-    input_len = 0;
+
+    /* raw.buffer may now point inside input. Compact the unconsumed tail so
+     * the next HTTP read can complete the same encoded frame. memmove is
+     * required because the source and destination regions overlap. */
+    input_len = raw.len;
+    if (input_len > 0 && raw.buffer != input) {
+      memmove(input, raw.buffer, input_len);
+    }
+
     if (eof) {
+      break;
+    }
+    if (input_len == DLNA_INPUT_BUFFER_SIZE && !made_progress) {
+      ESP_LOGE(TAG, "DLNA compressed frame exceeds %u-byte input buffer",
+               (unsigned)DLNA_INPUT_BUFFER_SIZE);
+      result = ESP_ERR_INVALID_SIZE;
       break;
     }
   }
@@ -708,7 +734,10 @@ static void player_task(void *arg) {
 
   esp_http_client_config_t config = {
       .url = uri,
-      .timeout_ms = 1500,
+      /* A short pause in a phone/NAS HTTP server must not terminate playback.
+       * This timeout affects network reads only; stop still closes the client
+       * handle to unblock the task immediately. */
+      .timeout_ms = 5000,
       .buffer_size = DLNA_INPUT_BUFFER_SIZE,
       .buffer_size_tx = 1024,
       .disable_auto_redirect = false,
