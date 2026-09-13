@@ -41,6 +41,7 @@
 #include "misc/cache/instance/lv_image_cache.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 static const char *TAG = "display_st7789";
@@ -169,8 +170,36 @@ static lv_obj_t *s_label_time_elapsed = NULL;
 static lv_obj_t *s_label_time_remaining = NULL;
 static lv_obj_t *s_label_battery = NULL;
 static lv_obj_t *s_label_volume = NULL;
+static lv_obj_t *s_theme_layer = NULL;
 static lv_obj_t *s_artwork_image = NULL;
 static lv_obj_t *s_artwork_placeholder = NULL;
+
+// R29 changes the colour theme from track metadata only. Album-art reception
+// and JPEG rendering remain disabled. A later revision can feed a colour
+// extracted from decoded artwork into the same apply_track_theme() function.
+typedef struct {
+  uint8_t bg_r;
+  uint8_t bg_g;
+  uint8_t bg_b;
+  uint8_t accent_r;
+  uint8_t accent_g;
+  uint8_t accent_b;
+} display_palette_t;
+
+static const display_palette_t s_track_palettes[] = {
+    {3, 16, 38, 30, 144, 255},    // blue
+    {27, 12, 48, 191, 90, 242},   // purple
+    {4, 37, 39, 45, 212, 191},    // teal
+    {48, 10, 25, 255, 69, 100},   // rose
+    {49, 25, 7, 255, 159, 10},    // amber
+    {10, 24, 52, 94, 92, 230},    // indigo
+    {5, 39, 24, 48, 209, 88},     // green
+    {46, 13, 8, 255, 99, 72},     // coral
+    {9, 32, 48, 100, 210, 255},   // cyan
+    {37, 15, 37, 255, 55, 150},   // magenta
+};
+
+static uint32_t s_applied_theme_key = UINT32_MAX;
 
 // Compressed JPEG ownership is transferred from the RTSP callback to the
 // display task. Both pending fields are protected by s_state_mutex. Active
@@ -257,6 +286,68 @@ static void format_time(uint32_t secs, char *buf, size_t len) {
 
 static void format_remaining(uint32_t remaining_secs, char *buf, size_t len) {
   snprintf(buf, len, "-%lu:%02lu", remaining_secs / 60, remaining_secs % 60);
+}
+
+static uint32_t theme_hash_append(uint32_t hash, const char *text) {
+  // FNV-1a deliberately hashes raw UTF-8 bytes. Spanish, Persian and Japanese
+  // titles therefore select palettes just as reliably as ASCII titles.
+  if (!text) {
+    return hash;
+  }
+  for (const uint8_t *p = (const uint8_t *)text; *p; ++p) {
+    hash ^= *p;
+    hash *= 16777619u;
+  }
+  hash ^= 0xffu; // field separator
+  hash *= 16777619u;
+  return hash;
+}
+
+// Called only while the LVGL lock is held. It performs no allocation and does
+// nothing when the selected theme is already active.
+static void apply_track_theme(const char *title, const char *artist,
+                              const char *album, display_state_t state) {
+  bool has_track = state != DISPLAY_STATE_STANDBY && title && title[0];
+  uint32_t key = 0;
+  size_t palette_index = 0;
+
+  if (has_track) {
+    key = 2166136261u;
+    key = theme_hash_append(key, title);
+    key = theme_hash_append(key, artist);
+    key = theme_hash_append(key, album);
+    if (key == 0) {
+      key = 1;
+    }
+    palette_index = key %
+                    (sizeof(s_track_palettes) / sizeof(s_track_palettes[0]));
+  }
+
+  if (key == s_applied_theme_key) {
+    return;
+  }
+  s_applied_theme_key = key;
+
+  const display_palette_t *palette = &s_track_palettes[palette_index];
+  lv_color_t background = lv_color_make(palette->bg_r, palette->bg_g,
+                                        palette->bg_b);
+  lv_color_t accent = lv_color_make(palette->accent_r, palette->accent_g,
+                                    palette->accent_b);
+
+  if (s_theme_layer) {
+    lv_obj_set_style_bg_color(s_theme_layer, background, 0);
+  }
+  if (s_bar_progress) {
+    lv_obj_set_style_bg_color(s_bar_progress, accent, LV_PART_INDICATOR);
+  }
+  if (s_label_status) {
+    lv_obj_set_style_text_color(s_label_status, accent, 0);
+  }
+  if (s_artwork_placeholder) {
+    lv_obj_set_style_border_color(s_artwork_placeholder, accent, 0);
+  }
+
+  ESP_LOGI(TAG, "Track colour theme: %u", (unsigned)palette_index);
 }
 
 static bool jpeg_get_dimensions(const uint8_t *data, size_t len,
@@ -391,6 +482,19 @@ static void ui_create(void) {
     lv_image_set_src(bg, &s_bg_dsc);
     lv_obj_align(bg, LV_ALIGN_TOP_LEFT, 0, 0);
   }
+
+  // Full-screen colour layer. It is created before every text/control widget,
+  // so it cannot cover metadata. With a custom SPIFFS background it acts as a
+  // strong tint; without one it is the complete screen background.
+  s_theme_layer = lv_obj_create(scr);
+  lv_obj_remove_style_all(s_theme_layer);
+  lv_obj_set_size(s_theme_layer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  lv_obj_align(s_theme_layer, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_bg_color(s_theme_layer, lv_color_make(3, 16, 38), 0);
+  lv_obj_set_style_bg_opa(s_theme_layer,
+                          s_bg_buf ? LV_OPA_90 : LV_OPA_COVER, 0);
+  lv_obj_clear_flag(s_theme_layer, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_theme_layer, LV_OBJ_FLAG_CLICKABLE);
 
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
   // Album-art area. This is compiled only when JPEG artwork is explicitly
@@ -650,6 +754,8 @@ static void ui_update(void) {
       !artwork_widget_set(pending_artwork, pending_artwork_len)) {
     heap_caps_free(pending_artwork);
   }
+
+  apply_track_theme(title, artist, album, state);
 
   switch (state) {
   case DISPLAY_STATE_STANDBY:
