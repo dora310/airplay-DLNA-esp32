@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 
@@ -51,12 +52,13 @@ esp_err_t audio_output_write_pcm(int16_t *data, size_t frames,
                                  TickType_t wait);
 
 /**
- * Write mutable stereo PCM through channel routing and software DSP without
- * applying the AirPlay volume gain. Sources which already applied their own
- * volume (for example DLNA RenderingControl) use this to avoid scaling twice.
+ * Write PCM through the normal processing path with a click-free 10 ms edge.
+ * Used by DLNA at pause/resume boundaries; ordinary playback should call
+ * audio_output_write_pcm().
  */
-esp_err_t audio_output_write_pcm_unscaled(int16_t *data, size_t frames,
-                                          TickType_t wait);
+esp_err_t audio_output_write_pcm_transition(int16_t *data, size_t frames,
+                                            bool fade_in, bool fade_out,
+                                            TickType_t wait);
 
 /**
  * Change the I2S sample rate (e.g. when BT negotiates 48 kHz)

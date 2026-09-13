@@ -23,6 +23,8 @@ static uint32_t s_clipping_count;
 static bool s_speaker_protection;
 static uint8_t s_speaker_threshold_percent = 90;
 static float s_normalizer_gain = 1.0f;
+static float s_eq_preamp_gain = 1.0f;
+static float s_limiter_gain = 1.0f;
 static SemaphoreHandle_t s_lock;
 
 static float clampf(float v, float lo, float hi) {
@@ -99,11 +101,30 @@ static void make_crossover(biquad_t *b) {
 }
 
 static void rebuild(void) {
+  float largest_boost_db = 0.0f;
+  int boosted_bands = 0;
   for (int i = 0; i < SOFTWARE_DSP_PEAK_BANDS; i++) {
     make_peak(&s_eq[i], s_cfg.bands[i].frequency_hz,
               s_cfg.bands[i].gain_db, s_cfg.bands[i].q);
+    if (s_cfg.bands[i].gain_db > 0.01f) {
+      boosted_bands++;
+      if (s_cfg.bands[i].gain_db > largest_boost_db) {
+        largest_boost_db = s_cfg.bands[i].gain_db;
+      }
+    }
   }
   make_crossover(&s_crossover);
+
+  // Positive EQ needs headroom before the biquads. Without this, a full-scale
+  // DLNA decoder output clips as soon as a band is boosted. The extra 3 dB for
+  // overlapping boosted bands is conservative without making EQ too quiet.
+  float headroom_db = largest_boost_db;
+  if (boosted_bands > 1) {
+    headroom_db += 3.0f;
+  }
+  headroom_db = clampf(headroom_db, 0.0f, 18.0f);
+  s_eq_preamp_gain = powf(10.0f, -headroom_db / 20.0f);
+  s_limiter_gain = 1.0f;
 }
 
 esp_err_t software_dsp_init(uint32_t sample_rate) {
@@ -181,6 +202,20 @@ static float run_biquad(biquad_t *b, float x, int ch) {
   return y;
 }
 
+void software_dsp_reset_state(void) {
+  if (!s_lock) return;
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  for (int i = 0; i < SOFTWARE_DSP_PEAK_BANDS; i++) {
+    memset(s_eq[i].z1, 0, sizeof(s_eq[i].z1));
+    memset(s_eq[i].z2, 0, sizeof(s_eq[i].z2));
+  }
+  memset(s_crossover.z1, 0, sizeof(s_crossover.z1));
+  memset(s_crossover.z2, 0, sizeof(s_crossover.z2));
+  s_normalizer_gain = 1.0f;
+  s_limiter_gain = 1.0f;
+  xSemaphoreGive(s_lock);
+}
+
 void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
   if (!pcm || frames == 0 || channels != 2 || !s_lock) return;
   xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -217,8 +252,9 @@ void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
       default: break;
       }
     }
-    l *= left_gain * s_normalizer_gain;
-    r *= right_gain * s_normalizer_gain;
+    float preamp = s_cfg.enabled ? s_eq_preamp_gain : 1.0f;
+    l *= left_gain * s_normalizer_gain * preamp;
+    r *= right_gain * s_normalizer_gain * preamp;
     if (s_cfg.enabled) {
       for (int b = 0; b < SOFTWARE_DSP_PEAK_BANDS; b++) {
         l = run_biquad(&s_eq[b], l, 0);
@@ -227,14 +263,34 @@ void software_dsp_process(int16_t *pcm, size_t frames, int channels) {
       l = run_biquad(&s_crossover, l, 0);
       r = run_biquad(&s_crossover, r, 1);
     }
-    if (fabsf(l) > 32767.0f || fabsf(r) > 32767.0f) s_clipping_count++;
+    if (!isfinite(l) || !isfinite(r)) {
+      // A corrupt decoder block or invalid transient must never be converted
+      // into a full-scale burst.
+      l = 0.0f;
+      r = 0.0f;
+      s_clipping_count++;
+    } else if (fabsf(l) > 32767.0f || fabsf(r) > 32767.0f) {
+      s_clipping_count++;
+    }
     if ((s_cfg.enabled && s_cfg.limiter_enabled) || s_speaker_protection) {
       const float threshold = s_speaker_protection
           ? 32767.0f * ((float)s_speaker_threshold_percent / 100.0f)
           : 32112.0f;
-      if (fabsf(l) > threshold || fabsf(r) > threshold) s_limiter_count++;
-      l = threshold * tanhf(l / threshold);
-      r = threshold * tanhf(r / threshold);
+      float sample_peak = fmaxf(fabsf(l), fabsf(r));
+      float wanted_gain = sample_peak > threshold ? threshold / sample_peak
+                                                   : 1.0f;
+      if (wanted_gain < 1.0f) {
+        s_limiter_count++;
+      }
+      // Immediate attack prevents clipping. Slow recovery avoids gain chatter
+      // and replaces two expensive/distorting tanhf() calls per audio frame.
+      if (wanted_gain < s_limiter_gain) {
+        s_limiter_gain = wanted_gain;
+      } else {
+        s_limiter_gain += (1.0f - s_limiter_gain) * 0.0005f;
+      }
+      l *= s_limiter_gain;
+      r *= s_limiter_gain;
     }
     pcm[i * 2] = (int16_t)clampf(l, -32768.0f, 32767.0f);
     pcm[i * 2 + 1] = (int16_t)clampf(r, -32768.0f, 32767.0f);

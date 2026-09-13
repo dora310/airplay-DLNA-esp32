@@ -52,6 +52,7 @@ static volatile bool flush_requested = false;
 static volatile bool playback_running = false;
 static TaskHandle_t playback_task_handle = NULL;
 static volatile int source_rate = 44100;
+static volatile uint32_t output_rate_hz = OUTPUT_RATE;
 static volatile bool resample_reinit_needed = false;
 static volatile audio_channel_mode_t channel_mode = AUDIO_CHANNEL_STEREO;
 
@@ -225,20 +226,45 @@ esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait) {
 
 esp_err_t audio_output_write_pcm(int16_t *data, size_t frames,
                                  TickType_t wait) {
+  return audio_output_write_pcm_transition(data, frames, false, false, wait);
+}
+
+esp_err_t audio_output_write_pcm_transition(int16_t *data, size_t frames,
+                                            bool fade_in, bool fade_out,
+                                            TickType_t wait) {
   if (!data) {
     return ESP_ERR_INVALID_ARG;
   }
   apply_volume(data, frames * 2);
-  return audio_output_write_pcm_unscaled(data, frames, wait);
-}
-
-esp_err_t audio_output_write_pcm_unscaled(int16_t *data, size_t frames,
-                                          TickType_t wait) {
-  if (!data) {
-    return ESP_ERR_INVALID_ARG;
-  }
   apply_channel_mode(data, frames);
   software_dsp_process(data, frames, 2);
+
+  // Apply the edge after EQ/limiting so the final sample reaching I2S really
+  // reaches zero. Fading before the biquads would leave a filter tail and pop.
+  if ((fade_in || fade_out) && frames > 0) {
+    size_t fade_frames = output_rate_hz / 100; // 10 ms
+    if (fade_frames > frames) fade_frames = frames;
+    if (fade_frames < 2) {
+      data[0] = 0;
+      data[1] = 0;
+    } else {
+      for (size_t i = 0; i < frames; i++) {
+        int32_t gain_q15 = 32767;
+        if (fade_in && i < fade_frames) {
+          gain_q15 = (int32_t)((i * 32767u) / (fade_frames - 1));
+        }
+        if (fade_out && i >= frames - fade_frames) {
+          int32_t out_gain =
+              (int32_t)(((frames - 1 - i) * 32767u) / (fade_frames - 1));
+          if (out_gain < gain_q15) gain_q15 = out_gain;
+        }
+        data[i * 2] =
+            (int16_t)(((int32_t)data[i * 2] * gain_q15) >> 15);
+        data[i * 2 + 1] =
+            (int16_t)(((int32_t)data[i * 2 + 1] * gain_q15) >> 15);
+      }
+    }
+  }
   led_audio_feed(data, frames);
   return audio_output_write(data, frames * 2 * sizeof(int16_t), wait);
 }
@@ -252,6 +278,7 @@ void audio_output_set_sample_rate(uint32_t rate) {
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
   i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
   i2s_channel_enable(tx_handle);
+  output_rate_hz = rate;
   software_dsp_set_sample_rate(rate);
 }
 

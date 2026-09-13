@@ -44,6 +44,8 @@ void software_dsp_set_sample_rate(uint32_t sample_rate);
 void software_dsp_get_config(software_dsp_config_t *config);
 esp_err_t software_dsp_set_config(const software_dsp_config_t *config);
 void software_dsp_process(int16_t *pcm, size_t frames, int channels);
+/** Clear filter/limiter history at a discontinuity such as DLNA pause. */
+void software_dsp_reset_state(void);
 uint32_t software_dsp_limiter_count(void);
 uint32_t software_dsp_clipping_count(void);
 bool software_dsp_limiter_active(void);
