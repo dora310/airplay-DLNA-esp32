@@ -1563,11 +1563,28 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
   } else if (strstr(req->content_type, "image/jpeg") ||
              strstr(req->content_type, "image/png")) {
 #ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
-    // Artwork - log and flag in metadata
-    ESP_LOGI(TAG, "Received artwork: %s (%zu bytes)", req->content_type,
-             body_len);
-    event_data.metadata.has_artwork = true;
-    has_metadata = true;
+    /* The event callback only copies accepted JPEG bytes into PSRAM. Decoding
+     * is performed later by the display's low-priority artwork task, never in
+     * this RTSP request/audio timing path. */
+    const size_t artwork_limit =
+        (size_t)CONFIG_AIRPLAY_ARTWORK_MAX_KB * 1024U;
+    if (!body || body_len == 0) {
+      ESP_LOGW(TAG, "Ignoring empty artwork request");
+    } else if (strstr(req->content_type, "image/png")) {
+      ESP_LOGW(TAG, "Ignoring PNG artwork (%zu bytes); JPEG only", body_len);
+    } else if (body_len > artwork_limit) {
+      ESP_LOGW(TAG, "Ignoring oversized artwork: %zu bytes (limit %zu)",
+               body_len, artwork_limit);
+    } else {
+      rtsp_event_data_t artwork_event;
+      memset(&artwork_event, 0, sizeof(artwork_event));
+      artwork_event.metadata.has_artwork = true;
+      artwork_event.metadata.artwork_data = body;
+      artwork_event.metadata.artwork_len = body_len;
+      artwork_event.metadata.artwork_format = RTSP_ARTWORK_JPEG;
+      ESP_LOGI(TAG, "Accepted JPEG artwork: %zu bytes", body_len);
+      rtsp_events_emit(RTSP_EVENT_METADATA, &artwork_event);
+    }
 #else
     // Artwork reception disabled — ignore it.  The md txt record already asks
     // senders not to transmit cover art, but some send it regardless.
