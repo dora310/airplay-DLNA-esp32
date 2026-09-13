@@ -38,6 +38,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lvgl.h"
+#include "misc/cache/instance/lv_image_cache.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -945,7 +946,8 @@ void display_init(void *bus) {
   // which matches the Kconfig default. BIT64(-1) is undefined, and
   // gpio_set_level(-1, ...) returns ESP_ERR_INVALID_ARG, so skip the config
   // entirely when the pin is not set.
-  if (CONFIG_DISPLAY_BL_GPIO >= 0) {
+#if CONFIG_DISPLAY_BL_GPIO >= 0
+  {
     gpio_config_t bl_cfg = {
         .pin_bit_mask = BIT64(CONFIG_DISPLAY_BL_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -953,6 +955,7 @@ void display_init(void *bus) {
     ESP_ERROR_CHECK(gpio_config(&bl_cfg));
     gpio_set_level(CONFIG_DISPLAY_BL_GPIO, 0);
   }
+#endif
 
   bg_load_from_spiffs();
 
@@ -1060,9 +1063,11 @@ void display_init(void *bus) {
     abort();
   }
 
-  if (CONFIG_DISPLAY_BL_GPIO >= 0) {
+#if CONFIG_DISPLAY_BL_GPIO >= 0
+  {
     gpio_set_level(CONFIG_DISPLAY_BL_GPIO, 1);
   }
+#endif
 
   s_display.state = DISPLAY_STATE_STANDBY;
   s_display.dirty = true;
