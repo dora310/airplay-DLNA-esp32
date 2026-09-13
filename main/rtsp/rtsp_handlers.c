@@ -806,6 +806,65 @@ static void handle_post(int socket, rtsp_conn_t *conn,
       if (bplist_find_int(body, body_len, "type", &cmd_type)) {
         ESP_LOGI(TAG, "/command type=%lld", (long long)cmd_type);
       }
+
+      // Modern AirPlay 2 carries MediaRemote NowPlayingInfo inside nested
+      // params dictionaries on /command. SET_PARAMETER alone is not enough
+      // for current Apple Music versions.
+      rtsp_event_data_t metadata_event;
+      memset(&metadata_event, 0, sizeof(metadata_event));
+      char value[METADATA_STRING_MAX];
+
+      if (bplist_find_string_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoTitle", value,
+              sizeof(value))) {
+        strlcpy(metadata_event.metadata.title, value,
+                sizeof(metadata_event.metadata.title));
+      }
+      if (bplist_find_string_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoArtist", value,
+              sizeof(value))) {
+        strlcpy(metadata_event.metadata.artist, value,
+                sizeof(metadata_event.metadata.artist));
+      }
+      if (bplist_find_string_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoAlbum", value,
+              sizeof(value))) {
+        strlcpy(metadata_event.metadata.album, value,
+                sizeof(metadata_event.metadata.album));
+      }
+      if (bplist_find_string_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoGenre", value,
+              sizeof(value))) {
+        strlcpy(metadata_event.metadata.genre, value,
+                sizeof(metadata_event.metadata.genre));
+      }
+
+      double number = 0.0;
+      if (bplist_find_real_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoDuration",
+              &number) &&
+          number > 0.0) {
+        metadata_event.metadata.duration_secs = (uint32_t)number;
+      }
+      if (bplist_find_real_deep(
+              body, body_len, "kMRMediaRemoteNowPlayingInfoElapsedTime",
+              &number) &&
+          number >= 0.0) {
+        metadata_event.metadata.position_secs = (uint32_t)number;
+      }
+
+      bool has_text = metadata_event.metadata.title[0] ||
+                      metadata_event.metadata.artist[0] ||
+                      metadata_event.metadata.album[0];
+      bool has_progress = metadata_event.metadata.duration_secs > 0 ||
+                          metadata_event.metadata.position_secs > 0;
+      if (has_text || has_progress) {
+        ESP_LOGI(TAG, "Now Playing: title='%s' artist='%s' album='%s'",
+                 metadata_event.metadata.title,
+                 metadata_event.metadata.artist,
+                 metadata_event.metadata.album);
+        rtsp_events_emit(RTSP_EVENT_METADATA, &metadata_event);
+      }
     }
     rtsp_send_ok(socket, conn, req->cseq);
 
