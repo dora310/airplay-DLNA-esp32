@@ -450,7 +450,7 @@ menu "Airplay ESP Configuration"
 
         config AIRPLAY_TIMING_THRESHOLD_MS
             int "Early/late timing threshold for buffered streams (ms)"
-            default 20
+            default 10
             range 2 200
             help
                 Maximum amount a frame may be early or late (in milliseconds)
@@ -478,6 +478,15 @@ menu "Airplay ESP Configuration"
             help
                 Receive cover-art images. Enable it only if you have a display
                 cabable of and want album art.
+
+        config AIRPLAY_ARTWORK_MAX_KB
+            int "Maximum accepted JPEG artwork size (KiB)"
+            default 256
+            range 32 512
+            depends on ENABLE_AIRPLAY_ARTWORK
+            help
+                Reject larger images before the display copies them into
+                PSRAM. This bounds memory use and protects the RTSP/audio path.
     endmenu
 
     menu "Button Configuration"
