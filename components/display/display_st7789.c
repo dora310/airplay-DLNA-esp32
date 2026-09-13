@@ -293,7 +293,7 @@ static void ui_create(void) {
     lv_obj_add_flag(s_label_album, LV_OBJ_FLAG_HIDDEN);
   }
 
-  // Paused status indicator — right side at album row, amber
+  // Playback status indicator — right side at album row, amber
   s_label_status = lv_label_create(scr);
   lv_obj_set_style_text_font(s_label_status, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(s_label_status, lv_color_make(255, 200, 0), 0);
@@ -475,7 +475,7 @@ static void ui_update(void) {
     lv_label_set_text(s_label_artist, artist[0] ? artist : "");
     lv_label_set_text(s_label_album, album[0] ? album : "");
     lv_label_set_text(s_label_status,
-                      state == DISPLAY_STATE_PAUSED ? "|| " : "");
+                      state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
 
     // Muted indicator
     if (playback_control_is_muted()) {
@@ -602,6 +602,41 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
   }
 
   STATE_UNLOCK();
+}
+
+void display_notify_metadata(const char *title, const char *artist,
+                             const char *album, uint32_t duration_secs,
+                             uint32_t position_secs) {
+  if (!s_state_mutex) {
+    return;
+  }
+  rtsp_event_data_t data = {0};
+  if (title) {
+    strlcpy(data.metadata.title, title, sizeof(data.metadata.title));
+  }
+  if (artist) {
+    strlcpy(data.metadata.artist, artist, sizeof(data.metadata.artist));
+  }
+  if (album) {
+    strlcpy(data.metadata.album, album, sizeof(data.metadata.album));
+  }
+  data.metadata.duration_secs = duration_secs;
+  data.metadata.position_secs = position_secs;
+  on_rtsp_event(RTSP_EVENT_METADATA, &data, NULL);
+}
+
+void display_notify_playback(bool paused) {
+  if (!s_state_mutex) {
+    return;
+  }
+  on_rtsp_event(paused ? RTSP_EVENT_PAUSED : RTSP_EVENT_PLAYING, NULL, NULL);
+}
+
+void display_notify_stopped(void) {
+  if (!s_state_mutex) {
+    return;
+  }
+  on_rtsp_event(RTSP_EVENT_DISCONNECTED, NULL, NULL);
 }
 
 // ============================================================================

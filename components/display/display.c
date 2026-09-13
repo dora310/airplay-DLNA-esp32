@@ -354,6 +354,32 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
   }
 }
 
+void display_notify_metadata(const char *title, const char *artist,
+                             const char *album, uint32_t duration_secs,
+                             uint32_t position_secs) {
+  rtsp_event_data_t data = {0};
+  if (title) {
+    strlcpy(data.metadata.title, title, sizeof(data.metadata.title));
+  }
+  if (artist) {
+    strlcpy(data.metadata.artist, artist, sizeof(data.metadata.artist));
+  }
+  if (album) {
+    strlcpy(data.metadata.album, album, sizeof(data.metadata.album));
+  }
+  data.metadata.duration_secs = duration_secs;
+  data.metadata.position_secs = position_secs;
+  on_rtsp_event(RTSP_EVENT_METADATA, &data, NULL);
+}
+
+void display_notify_playback(bool paused) {
+  on_rtsp_event(paused ? RTSP_EVENT_PAUSED : RTSP_EVENT_PLAYING, NULL, NULL);
+}
+
+void display_notify_stopped(void) {
+  on_rtsp_event(RTSP_EVENT_DISCONNECTED, NULL, NULL);
+}
+
 // ============================================================================
 // Display task
 // ============================================================================
