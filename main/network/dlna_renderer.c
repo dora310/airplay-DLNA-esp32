@@ -5,6 +5,7 @@
 #include "ethernet.h"
 #include "playback_control.h"
 #include "settings.h"
+#include "software_dsp.h"
 #include "source_manager.h"
 #include "wifi.h"
 
@@ -53,6 +54,8 @@ static TaskHandle_t s_player_task;
 static esp_http_client_handle_t s_http_client;
 static volatile dlna_state_t s_state = DLNA_STATE_STOPPED;
 static volatile bool s_stop_requested;
+static volatile bool s_pause_requested;
+static volatile bool s_resume_fade_pending;
 static volatile bool s_ssdp_running;
 static volatile bool s_airplay_active;
 static volatile bool s_ssdp_announce_pending;
@@ -374,12 +377,37 @@ static void pcm_apply_gain(int16_t *pcm, size_t samples) {
   }
 }
 
+static bool player_wait_if_paused(void);
+
+static esp_err_t write_stereo_block(int16_t *pcm, size_t frames) {
+  bool fade_out = s_pause_requested;
+  bool fade_in = s_resume_fade_pending;
+  esp_err_t err = audio_output_write_pcm_transition(
+      pcm, frames, fade_in, fade_out, portMAX_DELAY);
+  if (err != ESP_OK) {
+    return err;
+  }
+  if (fade_in) {
+    s_resume_fade_pending = false;
+  }
+  if (fade_out) {
+    // Enter PAUSED only after a zero-ending block is safely queued to I2S.
+    s_pause_requested = false;
+    s_state = DLNA_STATE_PAUSED;
+    display_notify_playback(true);
+    software_dsp_reset_state();
+    if (!player_wait_if_paused()) {
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+  return ESP_OK;
+}
+
 static esp_err_t write_pcm(uint8_t *pcm_bytes, size_t bytes, int channels) {
   if (channels == 2) {
     bytes &= ~(size_t)3;
     pcm_apply_gain((int16_t *)pcm_bytes, bytes / sizeof(int16_t));
-    return bytes ? audio_output_write_pcm((int16_t *)pcm_bytes, bytes / 4,
-                                          portMAX_DELAY)
+    return bytes ? write_stereo_block((int16_t *)pcm_bytes, bytes / 4)
                  : ESP_OK;
   }
   if (channels != 1) {
@@ -396,8 +424,7 @@ static esp_err_t write_pcm(uint8_t *pcm_bytes, size_t bytes, int channels) {
       stereo[i * 2 + 1] = mono[i];
     }
     pcm_apply_gain(stereo, count * 2);
-    esp_err_t err =
-        audio_output_write_pcm(stereo, count, portMAX_DELAY);
+    esp_err_t err = write_stereo_block(stereo, count);
     if (err != ESP_OK) {
       return err;
     }
@@ -720,6 +747,8 @@ static void player_task(void *arg) {
 
   s_state = DLNA_STATE_STOPPED;
   s_stop_requested = false;
+  s_pause_requested = false;
+  s_resume_fade_pending = false;
   source_manager_release(SOURCE_MANAGER_DLNA);
   if (playback_control_get_source() == PLAYBACK_SOURCE_DLNA) {
     playback_control_set_source(PLAYBACK_SOURCE_NONE);
@@ -759,6 +788,8 @@ static bool start_player(void) {
     return false;
   }
   s_stop_requested = false;
+  s_pause_requested = false;
+  s_resume_fade_pending = false;
   BaseType_t result = xTaskCreatePinnedToCore(
       player_task, "dlna_stream", DLNA_PLAYER_STACK_SIZE, NULL, 6,
       &s_player_task, 1);
@@ -793,6 +824,7 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
       return soap_fault(req, 701, "AirPlay has priority");
     }
     if (s_state == DLNA_STATE_PAUSED) {
+      s_resume_fade_pending = true;
       s_state = DLNA_STATE_PLAYING;
       display_notify_playback(false);
     } else if (!start_player()) {
@@ -801,8 +833,7 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
     }
   } else if (!strcmp(action_copy, "Pause")) {
     if (s_state == DLNA_STATE_PLAYING) {
-      s_state = DLNA_STATE_PAUSED;
-      display_notify_playback(true);
+      s_pause_requested = true;
     }
   } else if (!strcmp(action_copy, "Stop")) {
     stop_player(false);
@@ -1220,9 +1251,9 @@ bool dlna_renderer_is_playing(void) {
 
 void dlna_renderer_toggle_pause(void) {
   if (s_state == DLNA_STATE_PLAYING) {
-    s_state = DLNA_STATE_PAUSED;
-    display_notify_playback(true);
+    s_pause_requested = true;
   } else if (s_state == DLNA_STATE_PAUSED) {
+    s_resume_fade_pending = true;
     s_state = DLNA_STATE_PLAYING;
     display_notify_playback(false);
   }
