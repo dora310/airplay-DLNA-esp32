@@ -647,11 +647,13 @@ static void ui_create(void) {
     lv_obj_add_flag(s_label_album, LV_OBJ_FLAG_HIDDEN);
   }
 
-  // Playback status indicator — right side at album row, amber
+  // Playback status indicator — opposite Volume on the bottom-right. If a
+  // board reports a battery, ui_update_status_row() temporarily moves this
+  // back to the album row so the labels cannot overlap.
   s_label_status = lv_label_create(scr);
   lv_obj_set_style_text_font(s_label_status, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(s_label_status, lv_color_make(255, 200, 0), 0);
-  lv_obj_align(s_label_status, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_ALBUM);
+  lv_obj_align(s_label_status, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_STATUS);
   lv_label_set_text(s_label_status, "");
   if (DISPLAY_COMPACT_STRIP) {
     lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
@@ -733,6 +735,9 @@ static void ui_update_status_row(void) {
   int pct = 0;
   bool charging = false;
   if (board_battery_read(&pct, &charging)) {
+    // Battery owns the bottom-right corner; retain the previous album-row
+    // location for playback state on boards with battery telemetry.
+    lv_obj_align(s_label_status, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_ALBUM);
     const char *icon;
     if (charging) {
       icon = LV_SYMBOL_USB; // plugged into USB / charging
@@ -758,6 +763,9 @@ static void ui_update_status_row(void) {
     lv_obj_set_style_text_color(s_label_battery, color, 0);
   } else {
     lv_label_set_text(s_label_battery, "");
+    // Generic ESP32-S3 has no battery telemetry. Use the otherwise empty
+    // bottom-right corner for PLAYING/PAUSED opposite the volume label.
+    lv_obj_align(s_label_status, LV_ALIGN_TOP_RIGHT, X_MARGIN_R, Y_STATUS);
   }
 }
 
