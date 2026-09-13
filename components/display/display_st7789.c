@@ -89,8 +89,8 @@ LV_FONT_DECLARE(lv_font_international_16);
 #define ARTWORK_SIZE 48
 #define ARTWORK_X    4
 #define ARTWORK_Y    4
-#define TEXT_X       58
-#define TEXT_RIGHT   4
+#define TEXT_X       X_MARGIN
+#define TEXT_RIGHT   X_MARGIN
 #else
 #define X_MARGIN   22
 #define X_MARGIN_R (-22)
@@ -106,8 +106,8 @@ LV_FONT_DECLARE(lv_font_international_16);
 #define ARTWORK_SIZE 112
 #define ARTWORK_X    10
 #define ARTWORK_Y    10
-#define TEXT_X       134
-#define TEXT_RIGHT   10
+#define TEXT_X       X_MARGIN
+#define TEXT_RIGHT   X_MARGIN
 #endif
 
 // ============================================================================
@@ -297,6 +297,10 @@ static bool jpeg_get_dimensions(const uint8_t *data, size_t len,
 // Must be called with the LVGL lock held. Takes ownership of jpeg_data when
 // successful; on failure the caller remains responsible for freeing it.
 static bool artwork_widget_set(uint8_t *jpeg_data, size_t jpeg_len) {
+  if (!s_artwork_placeholder) {
+    return false;
+  }
+
   uint16_t width = 0, height = 0;
   if (!jpeg_get_dimensions(jpeg_data, jpeg_len, &width, &height)) {
     ESP_LOGW(TAG, "Rejected artwork with invalid JPEG dimensions");
@@ -379,8 +383,10 @@ static void ui_create(void) {
     lv_obj_align(bg, LV_ALIGN_TOP_LEFT, 0, 0);
   }
 
-  // Album-art area. The placeholder remains visible until a bounded JPEG is
-  // received and handed to LVGL by the display task.
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+  // Album-art area. This is compiled only when JPEG artwork is explicitly
+  // enabled. It is disabled in R24 because direct compressed-JPEG rendering
+  // produced a moving white rectangle on this ST7789/LVGL combination.
   s_artwork_placeholder = lv_obj_create(scr);
   lv_obj_set_size(s_artwork_placeholder, ARTWORK_SIZE, ARTWORK_SIZE);
   lv_obj_align(s_artwork_placeholder, LV_ALIGN_TOP_LEFT, ARTWORK_X, ARTWORK_Y);
@@ -399,6 +405,7 @@ static void ui_create(void) {
   lv_obj_set_style_text_color(artwork_text, lv_color_make(100, 105, 125), 0);
   lv_obj_set_style_text_font(artwork_text, &lv_font_montserrat_14, 0);
   lv_obj_center(artwork_text);
+#endif
 
   // Muted indicator — top-right corner, red, hidden by default
   s_label_muted = lv_label_create(scr);
@@ -717,6 +724,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
                           void *user_data) {
   (void)user_data;
 
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
   if (event == RTSP_EVENT_METADATA && data && data->metadata.has_artwork &&
       data->metadata.artwork_data && data->metadata.artwork_len > 0 &&
       data->metadata.artwork_format == RTSP_ARTWORK_JPEG) {
@@ -741,6 +749,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     }
     return;
   }
+#endif
 
   // All mutations of s_display happen under the state mutex so reads in
   // display_task see a consistent snapshot. The callback runs in the RTSP
