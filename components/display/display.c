@@ -351,6 +351,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
       scroll_restart();
     }
     break;
+
   }
 }
 
