@@ -144,19 +144,50 @@ static esp_err_t control_post(httpd_req_t *req) {
   cJSON *in = read_json(req);
   cJSON *action = in ? cJSON_GetObjectItem(in, "action") : NULL;
   bool ok = action && cJSON_IsString(action);
+  esp_err_t control_result = ESP_ERR_INVALID_ARG;
+  const char *message = NULL;
   if (ok) {
     const char *a = action->valuestring;
-    if (!strcmp(a, "play_pause")) playback_control_play_pause();
-    else if (!strcmp(a, "next")) playback_control_next();
-    else if (!strcmp(a, "previous")) playback_control_prev();
-    else if (!strcmp(a, "volume_up")) playback_control_volume_up();
-    else if (!strcmp(a, "volume_down")) playback_control_volume_down();
-    else if (!strcmp(a, "mute")) playback_control_toggle_mute();
-    else ok = false;
+    if (!strcmp(a, "play_pause")) {
+      control_result = playback_control_play_pause();
+      message = "Play/Pause applied.";
+    } else if (!strcmp(a, "next")) {
+      control_result = playback_control_next();
+      message = "Next-track command sent.";
+    } else if (!strcmp(a, "previous")) {
+      control_result = playback_control_prev();
+      message = "Previous-track command sent.";
+    } else if (!strcmp(a, "volume_up")) {
+      playback_control_volume_up();
+      control_result = ESP_OK;
+      message = "Volume increased.";
+    } else if (!strcmp(a, "volume_down")) {
+      playback_control_volume_down();
+      control_result = ESP_OK;
+      message = "Volume decreased.";
+    } else if (!strcmp(a, "mute")) {
+      control_result = playback_control_toggle_mute();
+      message = playback_control_is_muted() ? "Output muted."
+                                             : "Output unmuted.";
+    } else {
+      ok = false;
+    }
   }
+  ok = ok && control_result == ESP_OK;
   cJSON *out = cJSON_CreateObject();
   cJSON_AddBoolToObject(out, "success", ok);
-  if (!ok) cJSON_AddStringToObject(out, "error", "Unknown action");
+  if (ok && message) {
+    cJSON_AddStringToObject(out, "message", message);
+  } else if (control_result == ESP_ERR_NOT_SUPPORTED) {
+    cJSON_AddStringToObject(
+        out, "error",
+        "The active source does not expose remote Previous/Next control. "
+        "AirPlay 2 requires DACP/MRP support from the sender.");
+  } else if (control_result == ESP_ERR_INVALID_STATE) {
+    cJSON_AddStringToObject(out, "error", "No active playback source.");
+  } else {
+    cJSON_AddStringToObject(out, "error", "Unknown or rejected action.");
+  }
   esp_err_t err = send_json(req, out);
   cJSON_Delete(out);
   cJSON_Delete(in);
