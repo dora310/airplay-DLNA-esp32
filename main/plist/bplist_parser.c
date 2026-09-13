@@ -91,18 +91,49 @@ static bool bplist_read_string(const uint8_t *plist, size_t plist_len,
 
   if (type == BPLIST_UNICODE) {
     size_t bytes = len * 2;
-    if (pos + bytes > plist_len || len >= out_capacity) {
+    if (pos + bytes > plist_len || out_capacity == 0) {
       return false;
     }
+
+    /* Binary plists store Unicode strings as UTF-16BE. The old parser
+     * rejected the entire title as soon as it contained a non-ASCII
+     * character. Convert BMP characters and surrogate pairs to UTF-8. */
+    size_t written = 0;
     for (size_t i = 0; i < len; i++) {
-      uint16_t code =
-          (uint16_t)(plist[pos + i * 2] << 8) | plist[pos + i * 2 + 1];
-      if (code > 0x7F) {
-        return false;
+      uint32_t code =
+          (uint16_t)((uint16_t)plist[pos + i * 2] << 8) |
+          plist[pos + i * 2 + 1];
+      if (code >= 0xD800 && code <= 0xDBFF && i + 1 < len) {
+        uint32_t low =
+            (uint16_t)((uint16_t)plist[pos + (i + 1) * 2] << 8) |
+            plist[pos + (i + 1) * 2 + 1];
+        if (low >= 0xDC00 && low <= 0xDFFF) {
+          code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+          i++;
+        }
       }
-      out[i] = (char)code;
+
+      size_t need = code <= 0x7F ? 1 : code <= 0x7FF ? 2 : code <= 0xFFFF ? 3 : 4;
+      if (written + need >= out_capacity) {
+        break;
+      }
+      if (need == 1) {
+        out[written++] = (char)code;
+      } else if (need == 2) {
+        out[written++] = (char)(0xC0 | (code >> 6));
+        out[written++] = (char)(0x80 | (code & 0x3F));
+      } else if (need == 3) {
+        out[written++] = (char)(0xE0 | (code >> 12));
+        out[written++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        out[written++] = (char)(0x80 | (code & 0x3F));
+      } else {
+        out[written++] = (char)(0xF0 | (code >> 18));
+        out[written++] = (char)(0x80 | ((code >> 12) & 0x3F));
+        out[written++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        out[written++] = (char)(0x80 | (code & 0x3F));
+      }
     }
-    out[len] = '\0';
+    out[written] = '\0';
     return true;
   }
 
@@ -501,6 +532,100 @@ bool bplist_find_data_deep(const uint8_t *plist, size_t plist_len,
   return bplist_find_data_recursive(plist, plist_len, top_object,
                                     offset_table_offset, offset_size, ref_size,
                                     key, out_data, out_capacity, out_len, 0);
+}
+
+static bool bplist_find_string_recursive(
+    const uint8_t *plist, size_t plist_len, uint64_t obj_idx,
+    uint64_t offset_table_offset, uint8_t offset_size, uint8_t ref_size,
+    const char *key, char *out_str, size_t out_capacity, int depth) {
+  if (depth > 10) {
+    return false;
+  }
+
+  uint64_t offset =
+      bplist_get_offset(plist, offset_table_offset, offset_size, obj_idx);
+  if (offset >= plist_len) {
+    return false;
+  }
+  uint8_t type = plist[offset] & 0xF0;
+
+  if (type == BPLIST_DICT) {
+    size_t count = 0, header_len = 0;
+    if (!bplist_parse_count(plist, plist_len, offset, &count, &header_len)) {
+      return false;
+    }
+    size_t pos = offset + header_len;
+    if (pos + count * 2 * ref_size > plist_len) {
+      return false;
+    }
+    const uint8_t *key_refs = plist + pos;
+    const uint8_t *val_refs = plist + pos + count * ref_size;
+
+    for (size_t i = 0; i < count; i++) {
+      uint64_t key_idx = read_be_int(key_refs + i * ref_size, ref_size);
+      uint64_t key_offset =
+          bplist_get_offset(plist, offset_table_offset, offset_size, key_idx);
+      char found_key[64];
+      if (bplist_read_string(plist, plist_len, key_offset, found_key,
+                             sizeof(found_key)) &&
+          strcmp(found_key, key) == 0) {
+        uint64_t val_idx = read_be_int(val_refs + i * ref_size, ref_size);
+        uint64_t val_offset = bplist_get_offset(
+            plist, offset_table_offset, offset_size, val_idx);
+        if (bplist_read_string(plist, plist_len, val_offset, out_str,
+                               out_capacity)) {
+          return true;
+        }
+      }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+      uint64_t val_idx = read_be_int(val_refs + i * ref_size, ref_size);
+      if (bplist_find_string_recursive(
+              plist, plist_len, val_idx, offset_table_offset, offset_size,
+              ref_size, key, out_str, out_capacity, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (type == BPLIST_ARRAY || type == BPLIST_SET) {
+    size_t count = 0, header_len = 0;
+    if (!bplist_parse_count(plist, plist_len, offset, &count, &header_len)) {
+      return false;
+    }
+    size_t pos = offset + header_len;
+    if (pos + count * ref_size > plist_len) {
+      return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+      uint64_t idx = read_be_int(plist + pos + i * ref_size, ref_size);
+      if (bplist_find_string_recursive(
+              plist, plist_len, idx, offset_table_offset, offset_size,
+              ref_size, key, out_str, out_capacity, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool bplist_find_string_deep(const uint8_t *plist, size_t plist_len,
+                             const char *key, char *out_str,
+                             size_t out_capacity) {
+  if (!out_str || out_capacity == 0 || plist_len < 40 ||
+      memcmp(plist, "bplist00", 8) != 0) {
+    return false;
+  }
+  uint8_t offset_size = 0, ref_size = 0;
+  uint64_t num_objects = 0, top_object = 0, offset_table_offset = 0;
+  if (!bplist_parse_trailer(plist, plist_len, &offset_size, &ref_size,
+                            &num_objects, &top_object,
+                            &offset_table_offset)) {
+    return false;
+  }
+  (void)num_objects;
+  return bplist_find_string_recursive(
+      plist, plist_len, top_object, offset_table_offset, offset_size, ref_size,
+      key, out_str, out_capacity, 0);
 }
 
 bool bplist_find_int(const uint8_t *plist, size_t plist_len, const char *key,
