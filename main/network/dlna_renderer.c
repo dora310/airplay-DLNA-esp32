@@ -1,7 +1,6 @@
 #include "dlna_renderer.h"
 
 #include "audio_output.h"
-#include "audio_resample.h"
 #include "display.h"
 #include "ethernet.h"
 #include "playback_control.h"
@@ -31,7 +30,7 @@
 #include <strings.h>
 
 #define DLNA_SOAP_BODY_MAX      8192
-#define DLNA_INPUT_BUFFER_SIZE  16384
+#define DLNA_INPUT_BUFFER_SIZE  4096
 #define DLNA_OUTPUT_BUFFER_SIZE 8192
 #define DLNA_SSDP_PORT          1900
 #define DLNA_NOTIFY_SECONDS     900
@@ -57,8 +56,6 @@ static volatile dlna_state_t s_state = DLNA_STATE_STOPPED;
 static volatile bool s_stop_requested;
 static volatile bool s_pause_requested;
 static volatile bool s_resume_fade_pending;
-static int16_t *s_resample_pcm;
-static size_t s_resample_capacity_frames;
 static volatile bool s_ssdp_running;
 static volatile bool s_airplay_active;
 static volatile bool s_ssdp_announce_pending;
@@ -383,29 +380,6 @@ static void pcm_apply_gain(int16_t *pcm, size_t samples) {
 static bool player_wait_if_paused(void);
 
 static esp_err_t write_stereo_block(int16_t *pcm, size_t frames) {
-  if (audio_resample_is_active()) {
-    size_t needed = audio_resample_max_output(frames) + 16;
-    if (needed > s_resample_capacity_frames) {
-      int16_t *larger =
-          realloc(s_resample_pcm, needed * 2 * sizeof(int16_t));
-      if (!larger) {
-        ESP_LOGE(TAG, "No memory for %u-frame DLNA resample buffer",
-                 (unsigned)needed);
-        return ESP_ERR_NO_MEM;
-      }
-      s_resample_pcm = larger;
-      s_resample_capacity_frames = needed;
-    }
-    size_t produced = audio_resample_process(
-        pcm, frames, s_resample_pcm, s_resample_capacity_frames);
-    if (produced == 0) {
-      /* A filter may retain a short initial block until it has enough input. */
-      return ESP_OK;
-    }
-    pcm = s_resample_pcm;
-    frames = produced;
-  }
-
   bool fade_out = s_pause_requested;
   bool fade_in = s_resume_fade_pending;
   esp_err_t err = audio_output_write_pcm_transition(
@@ -607,15 +581,11 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       break;
     }
 
-    /* Keep any compressed bytes which the decoder did not consume and append
-     * the next HTTP block after them.  MP3/AAC/FLAC frames commonly cross TCP
-     * read boundaries; discarding this tail creates an audible discontinuity
-     * on every affected boundary. */
-    if (!eof && input_len < DLNA_INPUT_BUFFER_SIZE) {
-      int n = esp_http_client_read(client, (char *)input + input_len,
-                                   DLNA_INPUT_BUFFER_SIZE - input_len);
+    if (input_len == 0 && !eof) {
+      int n = esp_http_client_read(client, (char *)input,
+                                   DLNA_INPUT_BUFFER_SIZE);
       if (n > 0) {
-        input_len += (size_t)n;
+        input_len = (size_t)n;
       } else if (n == 0) {
         eof = true;
       } else if (s_stop_requested) {
@@ -635,17 +605,12 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
         .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
     };
     bool process_once = true;
-    bool made_progress = false;
     while (!s_stop_requested && (raw.len > 0 || (eof && process_once))) {
       esp_audio_simple_dec_out_t out = {
           .buffer = output,
           .len = output_capacity,
       };
       uint32_t before = raw.len;
-      /* consumed is an output for this individual decoder call.  Clear it so
-       * a decoder requesting more input cannot leave the previous call's
-       * value behind and accidentally skip compressed bytes. */
-      raw.consumed = 0;
       esp_audio_err_t dec_err =
           esp_audio_simple_dec_process(decoder, &raw, &out);
       if (dec_err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
@@ -678,23 +643,9 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
           break;
         }
         if (!format_ready) {
-          /* Keep the DAC/I2S clock at the configured output rate. Dynamic I2S
-           * reconfiguration was not checked for failure and caused 48 kHz PCM
-           * to be clocked at 44.1 kHz (slow, low-pitched playback). Convert
-           * DLNA PCM to the stable hardware rate instead. */
-          audio_output_set_sample_rate(CONFIG_OUTPUT_SAMPLE_RATE_HZ);
-          if (!audio_resample_init(info.sample_rate,
-                                   CONFIG_OUTPUT_SAMPLE_RATE_HZ, 2)) {
-            ESP_LOGE(TAG, "Cannot resample DLNA %lu -> %u Hz",
-                     (unsigned long)info.sample_rate,
-                     (unsigned)CONFIG_OUTPUT_SAMPLE_RATE_HZ);
-            result = ESP_ERR_NO_MEM;
-            s_stop_requested = true;
-            break;
-          }
-          ESP_LOGI(TAG, "DLNA %s: %lu Hz, %u channel -> %u Hz I2S",
-                   decoder_name(type), (unsigned long)info.sample_rate,
-                   info.channel, (unsigned)CONFIG_OUTPUT_SAMPLE_RATE_HZ);
+          audio_output_set_sample_rate(info.sample_rate);
+          ESP_LOGI(TAG, "DLNA %s: %lu Hz, %u channel", decoder_name(type),
+                   (unsigned long)info.sample_rate, info.channel);
           format_ready = true;
         }
         result = write_pcm(out.buffer, out.decoded_size, info.channel);
@@ -712,29 +663,12 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
       raw.buffer += raw.consumed;
       raw.len -= raw.consumed;
       process_once = false;
-      if (before != raw.len || out.decoded_size != 0) {
-        made_progress = true;
-      }
       if (before == raw.len && out.decoded_size == 0) {
         break;
       }
     }
-
-    /* raw.buffer may now point inside input. Compact the unconsumed tail so
-     * the next HTTP read can complete the same encoded frame. memmove is
-     * required because the source and destination regions overlap. */
-    input_len = raw.len;
-    if (input_len > 0 && raw.buffer != input) {
-      memmove(input, raw.buffer, input_len);
-    }
-
+    input_len = 0;
     if (eof) {
-      break;
-    }
-    if (input_len == DLNA_INPUT_BUFFER_SIZE && !made_progress) {
-      ESP_LOGE(TAG, "DLNA compressed frame exceeds %u-byte input buffer",
-               (unsigned)DLNA_INPUT_BUFFER_SIZE);
-      result = ESP_ERR_INVALID_SIZE;
       break;
     }
   }
@@ -746,10 +680,6 @@ static esp_err_t decode_http_stream(esp_http_client_handle_t client,
 
 static void restore_airplay_output(void) {
   audio_output_set_sample_rate(CONFIG_OUTPUT_SAMPLE_RATE_HZ);
-  /* DLNA temporarily owns the shared resampler while the AirPlay writer task
-   * is stopped. Restore AirPlay's native input-rate configuration before that
-   * task is started again. */
-  audio_resample_init(44100, CONFIG_OUTPUT_SAMPLE_RATE_HZ, 2);
   audio_output_start();
   playback_control_set_source(PLAYBACK_SOURCE_AIRPLAY);
 }
@@ -778,10 +708,7 @@ static void player_task(void *arg) {
 
   esp_http_client_config_t config = {
       .url = uri,
-      /* A short pause in a phone/NAS HTTP server must not terminate playback.
-       * This timeout affects network reads only; stop still closes the client
-       * handle to unblock the task immediately. */
-      .timeout_ms = 5000,
+      .timeout_ms = 1500,
       .buffer_size = DLNA_INPUT_BUFFER_SIZE,
       .buffer_size_tx = 1024,
       .disable_auto_redirect = false,
@@ -817,9 +744,6 @@ static void player_task(void *arg) {
     esp_http_client_cleanup(client);
   }
   free(input);
-  free(s_resample_pcm);
-  s_resample_pcm = NULL;
-  s_resample_capacity_frames = 0;
 
   s_state = DLNA_STATE_STOPPED;
   s_stop_requested = false;
