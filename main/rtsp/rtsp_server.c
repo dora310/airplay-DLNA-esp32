@@ -1,11 +1,16 @@
 #include "rtsp_server.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include "lwip/inet.h"
+#include "mdns.h"
 
 #include "audio_receiver.h"
 #include "audio_output.h"
@@ -23,6 +28,7 @@
 #include "ptp_clock.h"
 #include "rtsp_events.h"
 #include "dacp_client.h"
+#include "display.h"
 
 static const char *TAG = "rtsp_server";
 
@@ -56,6 +62,239 @@ static int current_slot = 0;
 // Flag set by the play/pause button to tell the grace period loop
 // to send a DACP resume command and keep waiting for reconnect.
 static volatile bool s_resume_requested = false;
+// Incremented for every accepted AirPlay client.  A slow DNS lookup from an
+// old session must never overwrite the name of a newer sender.
+static volatile uint32_t s_sender_generation = 0;
+static volatile uint32_t s_sender_explicit_generation = 0;
+
+typedef struct {
+  uint32_t client_ip;
+  uint32_t generation;
+} sender_lookup_args_t;
+
+static void format_sender_fallback(uint32_t client_ip, const char *kind,
+                                   char *out, size_t out_size) {
+  struct in_addr address = {.s_addr = client_ip};
+  char ip[INET_ADDRSTRLEN] = {0};
+  if (!inet_ntop(AF_INET, &address, ip, sizeof(ip))) {
+    strlcpy(ip, "unknown IP", sizeof(ip));
+  }
+  snprintf(out, out_size, "%.*s \xE2\x80\xA2 %s", 55,
+           kind ? kind : "AirPlay sender", ip);
+}
+
+static void clean_sender_name(char *name) {
+  if (!name) {
+    return;
+  }
+
+  // Remove surrounding quotes and control characters received in headers.
+  char *start = name;
+  while (*start && (isspace((unsigned char)*start) || *start == '"')) {
+    start++;
+  }
+  if (start != name) {
+    memmove(name, start, strlen(start) + 1);
+  }
+  for (char *p = name; *p; p++) {
+    if ((unsigned char)*p < 0x20) {
+      *p = ' ';
+    }
+  }
+  size_t len = strlen(name);
+  while (len > 0 && (isspace((unsigned char)name[len - 1]) ||
+                     name[len - 1] == '"')) {
+    name[--len] = '\0';
+  }
+
+  // Local DNS commonly returns "Qas-iPhone.local".  The suffix adds no
+  // useful information on the display.
+  if (len > 6 && strcasecmp(name + len - 6, ".local") == 0) {
+    name[len - 6] = '\0';
+  }
+}
+
+static bool name_looks_private_token(const char *name) {
+  if (!name || strlen(name) < 11) {
+    return false;
+  }
+  for (const char *p = name; *p; p++) {
+    if (!isxdigit((unsigned char)*p) && *p != '-' && *p != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool mdns_result_matches_ip(const mdns_result_t *result,
+                                   uint32_t client_ip) {
+  if (!result) {
+    return false;
+  }
+  for (const mdns_ip_addr_t *address = result->addr; address;
+       address = address->next) {
+    if (address->addr.type == ESP_IPADDR_TYPE_V4 &&
+        address->addr.u_addr.ip4.addr == client_ip) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void sender_lookup_task(void *context) {
+  sender_lookup_args_t *args = context;
+  if (!args) {
+    vTaskDelete(NULL);
+    return;
+  }
+
+  // These potentially blocking Bonjour queries deliberately run at low
+  // priority and never inside the RTSP receive or audio tasks. Apple devices
+  // commonly advertise _companion-link; classic AirPlay senders may instead
+  // expose a _dacp hostname.
+  char hostname[96] = {0};
+  static const struct {
+    const char *service;
+    bool prefer_instance;
+  } queries[] = {{"_companion-link", true}, {"_dacp", false}};
+
+  for (size_t query = 0;
+       query < sizeof(queries) / sizeof(queries[0]) && hostname[0] == '\0';
+       query++) {
+    mdns_result_t *results = NULL;
+    esp_err_t err = mdns_query_ptr(queries[query].service, "_tcp", 1200, 16,
+                                   &results);
+    if (err != ESP_OK || !results) {
+      continue;
+    }
+    for (mdns_result_t *item = results; item; item = item->next) {
+      if (!mdns_result_matches_ip(item, args->client_ip)) {
+        continue;
+      }
+      const char *candidate =
+          queries[query].prefer_instance ? item->instance_name : item->hostname;
+      if ((!candidate || candidate[0] == '\0') && item->hostname) {
+        candidate = item->hostname;
+      }
+      if (candidate && !name_looks_private_token(candidate)) {
+        strlcpy(hostname, candidate, sizeof(hostname));
+      }
+      break;
+    }
+    mdns_query_results_free(results);
+  }
+  clean_sender_name(hostname);
+
+  if (hostname[0] != '\0' && args->generation == s_sender_generation &&
+      args->generation != s_sender_explicit_generation) {
+    ESP_LOGI(TAG, "AirPlay sender resolved: %s", hostname);
+    display_notify_airplay_sender(hostname);
+  }
+
+  free(args);
+  vTaskDelete(NULL);
+}
+
+static void sender_identity_connected(uint32_t client_ip) {
+  uint32_t generation = ++s_sender_generation;
+  s_sender_explicit_generation = 0;
+  char fallback[96];
+  format_sender_fallback(client_ip, "AirPlay sender", fallback,
+                         sizeof(fallback));
+  display_notify_airplay_sender(fallback);
+
+  sender_lookup_args_t *args = calloc(1, sizeof(*args));
+  if (!args) {
+    return;
+  }
+  args->client_ip = client_ip;
+  args->generation = generation;
+  if (xTaskCreate(sender_lookup_task, "sender_name", 3072, args, 1, NULL) !=
+      pdPASS) {
+    free(args);
+  }
+}
+
+static bool copy_header_value(const char *headers, const char *header_name,
+                              char *out, size_t out_size) {
+  if (!headers || !header_name || !out || out_size == 0) {
+    return false;
+  }
+
+  size_t name_len = strlen(header_name);
+  const char *line = headers;
+  while (*line) {
+    const char *line_end = strstr(line, "\r\n");
+    if (!line_end) {
+      line_end = line + strlen(line);
+    }
+    if ((size_t)(line_end - line) > name_len &&
+        strncasecmp(line, header_name, name_len) == 0 &&
+        line[name_len] == ':') {
+      const char *value = line + name_len + 1;
+      while (value < line_end && isspace((unsigned char)*value)) {
+        value++;
+      }
+      size_t value_len = (size_t)(line_end - value);
+      if (value_len >= out_size) {
+        value_len = out_size - 1;
+      }
+      memcpy(out, value, value_len);
+      out[value_len] = '\0';
+      clean_sender_name(out);
+      return out[0] != '\0';
+    }
+    if (*line_end == '\0') {
+      break;
+    }
+    line = line_end + 2;
+  }
+  return false;
+}
+
+static void sender_identity_observe_headers(const rtsp_conn_t *conn,
+                                            const char *headers) {
+  if (!conn || !headers) {
+    return;
+  }
+
+  // These friendly-name headers are optional.  Some Apple and third-party
+  // senders provide one of them; modern iOS is allowed to omit all of them.
+  static const char *const friendly_headers[] = {
+      "X-Apple-Client-Name", "X-Apple-Device-Name", "Client-Name"};
+  char value[96];
+  for (size_t i = 0; i < sizeof(friendly_headers) / sizeof(friendly_headers[0]);
+       i++) {
+    if (copy_header_value(headers, friendly_headers[i], value,
+                          sizeof(value))) {
+      ESP_LOGI(TAG, "AirPlay sender name: %s", value);
+      s_sender_explicit_generation = s_sender_generation;
+      display_notify_airplay_sender(value);
+      return;
+    }
+  }
+
+  // Even without a friendly name, identify the sender type more usefully
+  // than a bare address.
+  if (s_sender_explicit_generation == s_sender_generation) {
+    return;
+  }
+  if (copy_header_value(headers, "User-Agent", value, sizeof(value))) {
+    const char *kind = NULL;
+    if (strcasestr(value, "iphone")) {
+      kind = "iPhone";
+    } else if (strcasestr(value, "ipad")) {
+      kind = "iPad";
+    } else if (strcasestr(value, "mac") || strcasestr(value, "itunes")) {
+      kind = "Mac";
+    }
+    if (kind) {
+      char label[96];
+      format_sender_fallback(conn->client_ip, kind, label, sizeof(label));
+      display_notify_airplay_sender(label);
+    }
+  }
+}
 // PCM5102A has no volume-control register. Keep mute as a non-persistent
 // software gate in the final Q15 gain path instead of calling an absent DAC
 // driver or overwriting the user's saved volume with -30 dB.
@@ -139,6 +378,8 @@ static void process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
       break;
     }
 
+    sender_identity_observe_headers(slot->conn, header_str);
+
     // Null-terminate so strcasestr in parse_raw_header won't read past
     // the message boundary (buffer capacity > total_len).
     uint8_t saved = buffer[total_len];
@@ -182,6 +423,7 @@ static void client_task(void *pvParameters) {
              (unsigned int)((conn->client_ip >> 8) & 0xFF),
              (unsigned int)((conn->client_ip >> 16) & 0xFF),
              (unsigned int)((conn->client_ip >> 24) & 0xFF));
+    sender_identity_connected(conn->client_ip);
   }
 
   // Allocate buffer
