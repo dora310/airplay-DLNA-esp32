@@ -38,6 +38,12 @@ void display_notify_playback(bool paused);
 /** Return the display to its standby screen. */
 void display_notify_stopped(void);
 
+/**
+ * Update the friendly identity of the currently connected AirPlay sender.
+ * The supplied string is copied immediately and may be temporary storage.
+ */
+void display_notify_airplay_sender(const char *sender_name);
+
 #else
 
 static inline void display_init(void *bus) {
@@ -59,5 +65,9 @@ static inline void display_notify_metadata(const char *title,
 static inline void display_notify_playback(bool paused) { (void)paused; }
 
 static inline void display_notify_stopped(void) {}
+
+static inline void display_notify_airplay_sender(const char *sender_name) {
+  (void)sender_name;
+}
 
 #endif
