@@ -161,6 +161,7 @@ static struct {
   char title[METADATA_STRING_MAX];
   char artist[METADATA_STRING_MAX];
   char album[METADATA_STRING_MAX];
+  char sender[96];
   uint32_t duration_secs;
   uint32_t position_secs;
   display_state_t state;
@@ -788,6 +789,7 @@ static void ui_update(void) {
   char title[METADATA_STRING_MAX];
   char artist[METADATA_STRING_MAX];
   char album[METADATA_STRING_MAX];
+  char sender[96];
   uint32_t duration_secs;
   uint32_t position_secs;
   int64_t sync_time_us;
@@ -805,6 +807,7 @@ static void ui_update(void) {
   memcpy(title, s_display.title, sizeof(title));
   memcpy(artist, s_display.artist, sizeof(artist));
   memcpy(album, s_display.album, sizeof(album));
+  memcpy(sender, s_display.sender, sizeof(sender));
   duration_secs = s_display.duration_secs;
   position_secs = s_display.position_secs;
   sync_time_us = s_display.sync_time_us;
@@ -830,6 +833,7 @@ static void ui_update(void) {
   title[METADATA_STRING_MAX - 1] = '\0';
   artist[METADATA_STRING_MAX - 1] = '\0';
   album[METADATA_STRING_MAX - 1] = '\0';
+  sender[sizeof(sender) - 1] = '\0';
 
   if (!lvgl_port_lock(100)) {
     ESP_LOGW(TAG, "ui_update: lock timeout");
@@ -884,7 +888,9 @@ static void ui_update(void) {
     lv_label_set_text(s_label_title,
                       title[0] ? title : "AirPlay Connected");
     lv_label_set_text(s_label_artist,
-                      artist[0] ? artist : "Waiting for track details...");
+                      artist[0] ? artist
+                                : (sender[0] ? sender
+                                             : "Waiting for track details..."));
     lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
@@ -901,7 +907,9 @@ static void ui_update(void) {
                                       ? "AirPlay Paused"
                                       : "AirPlay Playing"));
     lv_label_set_text(s_label_artist,
-                      artist[0] ? artist : "Waiting for track details...");
+                      artist[0] ? artist
+                                : (sender[0] ? sender
+                                             : "Waiting for track details..."));
     lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
     lv_label_set_text(s_label_status,
                       state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
@@ -1026,6 +1034,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
     memset(s_display.album, 0, sizeof(s_display.album));
+    memset(s_display.sender, 0, sizeof(s_display.sender));
     s_display.duration_secs = 0;
     s_display.position_secs = 0;
     s_display.sync_time_us = 0;
@@ -1116,6 +1125,16 @@ void display_notify_stopped(void) {
     return;
   }
   on_rtsp_event(RTSP_EVENT_DISCONNECTED, NULL, NULL);
+}
+
+void display_notify_airplay_sender(const char *sender_name) {
+  if (!s_state_mutex || !sender_name || sender_name[0] == '\0') {
+    return;
+  }
+  STATE_LOCK();
+  strlcpy(s_display.sender, sender_name, sizeof(s_display.sender));
+  s_display.dirty = true;
+  STATE_UNLOCK();
 }
 
 // ============================================================================
