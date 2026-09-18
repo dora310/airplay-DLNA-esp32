@@ -799,9 +799,7 @@ static void ui_update(void) {
   uint16_t pending_artwork_width = 0;
   uint16_t pending_artwork_height = 0;
   bool clear_artwork = false;
-  char wifi_text[48];
-
-  wifi_status_text(wifi_text, sizeof(wifi_text));
+  char wifi_text[48] = {0};
 
   STATE_LOCK();
   memcpy(title, s_display.title, sizeof(title));
@@ -834,6 +832,13 @@ static void ui_update(void) {
   artist[METADATA_STRING_MAX - 1] = '\0';
   album[METADATA_STRING_MAX - 1] = '\0';
   sender[sizeof(sender) - 1] = '\0';
+
+  // Query and show the associated Wi-Fi network only while the receiver is
+  // idle.  Once an AirPlay client connects, use its sender identity instead;
+  // never leak the router SSID into the playing/paused metadata view.
+  if (state == DISPLAY_STATE_STANDBY) {
+    wifi_status_text(wifi_text, sizeof(wifi_text));
+  }
 
   if (!lvgl_port_lock(100)) {
     ESP_LOGW(TAG, "ui_update: lock timeout");
@@ -891,7 +896,9 @@ static void ui_update(void) {
                       artist[0] ? artist
                                 : (sender[0] ? sender
                                              : "Waiting for track details..."));
-    lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
+    lv_label_set_text(s_label_album,
+                      album[0] ? album
+                               : (sender[0] ? sender : "AirPlay sender"));
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
@@ -910,7 +917,9 @@ static void ui_update(void) {
                       artist[0] ? artist
                                 : (sender[0] ? sender
                                              : "Waiting for track details..."));
-    lv_label_set_text(s_label_album, album[0] ? album : wifi_text);
+    lv_label_set_text(s_label_album,
+                      album[0] ? album
+                               : (sender[0] ? sender : "AirPlay sender"));
     lv_label_set_text(s_label_status,
                       state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
 
