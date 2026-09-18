@@ -47,8 +47,8 @@ jobs:
           esp_idf_version: v5.5
           target: esp32s3
           command: >
-            rm -f sdkconfig sdkconfig.old &&
-            rm -rf build &&
+            rm -f sdkconfig sdkconfig.old dependencies.lock &&
+            rm -rf build managed_components &&
             idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build &&
             cp build/airplay2-receiver.bin firmware-ota.bin &&
             cd build &&
