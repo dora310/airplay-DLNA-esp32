@@ -43,7 +43,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "lvgl.h"
-#include "misc/cache/instance/lv_image_cache.h"
+#include "misc/cache/lv_image_cache.h"
 
 #include <stdio.h>
 #include <stdint.h>
