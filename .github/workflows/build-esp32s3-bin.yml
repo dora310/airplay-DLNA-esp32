@@ -47,6 +47,7 @@ jobs:
           esp_idf_version: v5.5
           target: esp32s3
           command: >
+            python -m pip install --no-cache-dir "idf-component-manager==2.5.2" &&
             rm -f sdkconfig sdkconfig.old dependencies.lock &&
             rm -rf build managed_components &&
             idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3" build &&
