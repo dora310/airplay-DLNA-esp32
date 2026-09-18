@@ -70,6 +70,9 @@ CONFIG_LV_TXT_ENC_UTF8=y
 CONFIG_LV_USE_BIDI=y
 CONFIG_LV_BIDI_DIR_AUTO=y
 CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=y
+# Runtime FreeType is not used. International glyphs are compiled into
+# components/display/fonts/lv_font_international_16.c.
+CONFIG_LV_USE_FREETYPE=n
 # R33 uses a private bounded TJpgDec worker to produce RGB565 before LVGL sees
 # the image. Keep LVGL's direct JPEG decoder disabled: it was responsible for
 # the moving white rectangle and unsafe compressed-buffer lifetime.
