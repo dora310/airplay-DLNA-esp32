@@ -906,8 +906,7 @@ static void ui_update(void) {
                                 : (sender[0] ? sender
                                              : "Waiting for track details..."));
     lv_label_set_text(s_label_album,
-                      album[0] ? album
-                               : (sender[0] ? sender : "AirPlay sender"));
+                      album[0] ? album : "Waiting for music...");
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
@@ -917,6 +916,8 @@ static void ui_update(void) {
 
   case DISPLAY_STATE_PLAYING:
   case DISPLAY_STATE_PAUSED: {
+    char playback_status[64];
+
     lv_label_set_text(s_label_title,
                       title[0] ? title
                                : (dlna_active
@@ -935,14 +936,19 @@ static void ui_update(void) {
                       album[0] ? album
                                : (dlna_active
                                       ? "DLNA"
-                                      : (sender[0] ? sender
-                                                   : "AirPlay sender")));
-    lv_label_set_text(s_label_status,
-                      dlna_active
-                          ? (state == DISPLAY_STATE_PAUSED ? "DLNA PAUSED"
-                                                           : "DLNA PLAYING")
-                          : (state == DISPLAY_STATE_PAUSED ? "PAUSED"
-                                                           : "PLAYING"));
+                                      : "Waiting for track details..."));
+
+    if (dlna_active) {
+      snprintf(playback_status, sizeof(playback_status), "DLNA %s",
+               state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+    } else if (sender[0]) {
+      snprintf(playback_status, sizeof(playback_status), "%.24s | %s", sender,
+               state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+    } else {
+      snprintf(playback_status, sizeof(playback_status), "%s",
+               state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+    }
+    lv_label_set_text(s_label_status, playback_status);
 
     // Muted indicator
     if (playback_control_is_muted()) {
