@@ -690,6 +690,7 @@ static void player_task(void *arg) {
   strlcpy(uri, s_uri, sizeof(uri));
 
   if (s_airplay_active) {
+    display_notify_dlna_active(false);
     s_state = DLNA_STATE_STOPPED;
     s_player_task = NULL;
     vTaskDelete(NULL);
@@ -753,7 +754,12 @@ static void player_task(void *arg) {
   if (playback_control_get_source() == PLAYBACK_SOURCE_DLNA) {
     playback_control_set_source(PLAYBACK_SOURCE_NONE);
   }
-  display_notify_stopped();
+  display_notify_dlna_active(false);
+  /* AirPlay's CONNECTED event has already prepared its normal screen during
+   * a takeover. Do not overwrite that screen with DLNA's standby cleanup. */
+  if (!s_airplay_active) {
+    display_notify_stopped();
+  }
   restore_airplay_output();
   ESP_LOGI(TAG, "DLNA playback ended; AirPlay remained available");
   s_player_task = NULL;
@@ -787,6 +793,7 @@ static bool start_player(void) {
   if (!source_manager_acquire(SOURCE_MANAGER_DLNA)) {
     return false;
   }
+  display_notify_dlna_active(true);
   s_stop_requested = false;
   s_pause_requested = false;
   s_resume_fade_pending = false;
@@ -796,6 +803,7 @@ static bool start_player(void) {
   if (result != pdPASS) {
     s_player_task = NULL;
     source_manager_release(SOURCE_MANAGER_DLNA);
+    display_notify_dlna_active(false);
     return false;
   }
   playback_control_set_source(PLAYBACK_SOURCE_DLNA);
@@ -817,7 +825,10 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
     xml_value(body, "CurrentURI", s_uri, sizeof(s_uri));
     xml_value(body, "CurrentURIMetaData", s_metadata, sizeof(s_metadata));
     ESP_LOGI(TAG, "Set URI: %.160s", s_uri);
-    emit_dlna_metadata();
+    if (!s_airplay_active) {
+      display_notify_dlna_active(true);
+      emit_dlna_metadata();
+    }
   } else if (!strcmp(action_copy, "Play")) {
     if (s_airplay_active) {
       free(body);
@@ -837,7 +848,10 @@ static esp_err_t avtransport_control_handler(httpd_req_t *req) {
     }
   } else if (!strcmp(action_copy, "Stop")) {
     stop_player(false);
-    display_notify_stopped();
+    display_notify_dlna_active(false);
+    if (!s_airplay_active) {
+      display_notify_stopped();
+    }
   } else if (!strcmp(action_copy, "GetTransportInfo")) {
     snprintf(args, sizeof(args),
              "<CurrentTransportState>%s</CurrentTransportState>"
@@ -1236,6 +1250,7 @@ void dlna_renderer_set_airplay_active(bool active) {
   }
   s_airplay_active = active;
   if (active) {
+    display_notify_dlna_active(false);
     ESP_LOGI(TAG, "SSDP paused; AirPlay has exclusive network priority");
     if (!stop_player(true)) {
       ESP_LOGW(TAG, "DLNA player did not stop before AirPlay takeover");
@@ -1286,12 +1301,18 @@ esp_err_t dlna_renderer_play_uri(const char *uri) {
   }
   strlcpy(s_uri, uri, sizeof(s_uri));
   s_metadata[0] = '\0';
+  display_notify_dlna_active(true);
   emit_dlna_metadata();
-  return start_player() ? ESP_OK : ESP_FAIL;
+  if (start_player()) {
+    return ESP_OK;
+  }
+  display_notify_dlna_active(false);
+  return ESP_FAIL;
 }
 
 void dlna_renderer_stop_playback(void) {
   stop_player(false);
+  display_notify_dlna_active(false);
   display_notify_stopped();
 }
 
