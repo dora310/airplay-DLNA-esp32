@@ -14,6 +14,7 @@
 #include "lwip/ip4_addr.h"
 
 #include "wifi.h"
+#include "led.h"
 #include "settings.h"
 
 static const char *TAG = "wifi";
@@ -122,6 +123,7 @@ static void retry_timer_callback(void *arg) {
   if (s_has_credentials && !s_sta_connected) {
     ESP_LOGI(TAG, "Retry timer fired, reconnecting (attempt %d)...",
              s_retry_num + 1);
+    led_set_wifi_state(LED_WIFI_CONNECTING);
     esp_wifi_connect();
   }
 }
@@ -175,10 +177,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
     if (!s_has_credentials) {
+      led_set_wifi_state(LED_WIFI_DISCONNECTED);
       ESP_LOGI(TAG,
                "No saved WiFi credentials; setup AP remains available");
       return;
     }
+    led_set_wifi_state(LED_WIFI_CONNECTING);
     // Defer scan+connect to a separate task — the blocking scan uses too
     // much stack to run inside the sys_evt event loop (2–4 KB).
     if (xTaskCreate(scan_and_connect_task, "wifi_scan", 4096, NULL, 3,
@@ -189,6 +193,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_sta_connected = false;
+    led_set_wifi_state(LED_WIFI_DISCONNECTED);
     if (s_ap_shutdown_timer) {
       (void)esp_timer_stop(s_ap_shutdown_timer);
     }
@@ -208,6 +213,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
       // Fast retries — reconnect immediately
       ESP_LOGI(TAG, "Retrying connection (%d/%d)...", s_retry_num,
                AP_REENABLE_THRESHOLD);
+      led_set_wifi_state(LED_WIFI_CONNECTING);
       esp_wifi_connect();
     } else {
       if (s_retry_num == AP_REENABLE_THRESHOLD) {
@@ -227,11 +233,16 @@ static void event_handler(void *arg, esp_event_base_t event_base,
       // Delayed retries with backoff
       schedule_retry();
     }
+  } else if (event_base == WIFI_EVENT &&
+             event_id == WIFI_EVENT_STA_CONNECTED) {
+    // Associated with the access point; authentication/DHCP is in progress.
+    led_set_wifi_state(LED_WIFI_CONNECTING);
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     s_retry_num = 0;
     s_sta_connected = true;
+    led_set_wifi_state(LED_WIFI_CONNECTED);
     xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
     if (s_pending_credential_test) {
       esp_err_t promote = settings_promote_pending_wifi_credentials();
@@ -701,6 +712,7 @@ void wifi_stop(void) {
     s_sta_connected = false;
     s_has_credentials = false;
     s_retry_num = 0;
+    led_set_wifi_state(LED_WIFI_DISCONNECTED);
     if (s_wifi_event_group) {
       xEventGroupClearBits(s_wifi_event_group,
                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
