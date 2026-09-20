@@ -46,28 +46,6 @@ static led_mode_t get_status_mode_playing(void) {
 #endif
 }
 
-static led_mode_t get_status_mode_paused(void) {
-#if defined(CONFIG_LED_STATUS_PAUSED_OFF)
-  return LED_OFF;
-#elif defined(CONFIG_LED_STATUS_PAUSED_STEADY)
-  return LED_STEADY;
-#elif defined(CONFIG_LED_STATUS_PAUSED_BLINK_SLOW)
-  return LED_BLINK_SLOW;
-#else
-  return LED_BLINK_MEDIUM;
-#endif
-}
-
-static led_mode_t get_status_mode_standby(void) {
-#if defined(CONFIG_LED_STATUS_STANDBY_OFF)
-  return LED_OFF;
-#elif defined(CONFIG_LED_STATUS_STANDBY_BLINK_MEDIUM)
-  return LED_BLINK_MEDIUM;
-#else
-  return LED_BLINK_SLOW;
-#endif
-}
-
 static led_mode_t get_rgb_mode_playing(void) {
 #if defined(CONFIG_LED_RGB_PLAYING_OFF)
   return LED_OFF;
@@ -75,22 +53,6 @@ static led_mode_t get_rgb_mode_playing(void) {
   return LED_STEADY;
 #else
   return LED_VU;
-#endif
-}
-
-static led_mode_t get_rgb_mode_paused(void) {
-#if defined(CONFIG_LED_RGB_PAUSED_OFF)
-  return LED_OFF;
-#else
-  return LED_STEADY;
-#endif
-}
-
-static led_mode_t get_rgb_mode_standby(void) {
-#if defined(CONFIG_LED_RGB_STANDBY_STEADY)
-  return LED_STEADY;
-#else
-  return LED_OFF;
 #endif
 }
 
@@ -326,6 +288,14 @@ static void error_led_set(bool on) {
 
 static led_strip_handle_t s_rgb_strip = NULL;
 static led_mode_t s_rgb_mode = LED_OFF;
+static TimerHandle_t s_rgb_blink_timer = NULL;
+static volatile bool s_rgb_blinking = false;
+static bool s_rgb_blink_on = false;
+static uint8_t s_rgb_blink_r = 0;
+static uint8_t s_rgb_blink_g = 0;
+static uint8_t s_rgb_blink_b = 0;
+
+static void rgb_blink_timer_cb(TimerHandle_t xTimer);
 
 static void rgb_led_init(void) {
   led_strip_config_t strip_cfg = {
@@ -347,6 +317,12 @@ static void rgb_led_init(void) {
   }
 
   led_strip_clear(s_rgb_strip);
+  s_rgb_blink_timer =
+      xTimerCreate("rgb_blink", pdMS_TO_TICKS(700), pdTRUE, NULL,
+                   rgb_blink_timer_cb);
+  if (!s_rgb_blink_timer) {
+    ESP_LOGE(TAG, "RGB LED blink timer allocation failed");
+  }
   ESP_LOGI(TAG, "RGB LED initialized on GPIO %d", CONFIG_LED_RGB_GPIO);
 }
 
@@ -366,7 +342,47 @@ static void rgb_led_clear(void) {
   led_strip_refresh(s_rgb_strip);
 }
 
+static void rgb_blink_timer_cb(TimerHandle_t xTimer) {
+  (void)xTimer;
+  if (!s_rgb_blinking) {
+    return;
+  }
+  s_rgb_blink_on = !s_rgb_blink_on;
+  if (s_rgb_blink_on) {
+    rgb_led_set_color(s_rgb_blink_r, s_rgb_blink_g, s_rgb_blink_b);
+  } else {
+    rgb_led_clear();
+  }
+}
+
+static void rgb_led_stop_blink(void) {
+  s_rgb_blinking = false;
+  if (s_rgb_blink_timer && xTimerIsTimerActive(s_rgb_blink_timer)) {
+    xTimerStop(s_rgb_blink_timer, 10);
+  }
+}
+
+static void rgb_led_start_blink(uint8_t r, uint8_t g, uint8_t b,
+                                uint32_t period_ms) {
+  if (!s_rgb_strip || !s_rgb_blink_timer) {
+    return;
+  }
+  rgb_led_stop_blink();
+  s_rgb_mode = LED_STEADY;
+  s_rgb_blink_r = r;
+  s_rgb_blink_g = g;
+  s_rgb_blink_b = b;
+  s_rgb_blink_on = true;
+  s_rgb_blinking = true;
+  rgb_led_set_color(r, g, b);
+  if (xTimerChangePeriod(s_rgb_blink_timer, pdMS_TO_TICKS(period_ms), 10) !=
+      pdPASS) {
+    ESP_LOGW(TAG, "Failed to start RGB blink timer");
+  }
+}
+
 static void rgb_led_set_mode(led_mode_t mode) {
+  rgb_led_stop_blink();
   s_rgb_mode = mode;
 
   switch (mode) {
@@ -400,16 +416,13 @@ static void rgb_led_set_vu(float norm, float bass_ratio) {
     val = 1;
   }
 
-  // Map to HSV hue: 170 (blue, quiet) -> 85 (green, medium) -> 0 (red, loud)
-  uint16_t hue = (uint16_t)(170.0f * (1.0f - norm));
-
-  // Shift towards purple/magenta when bassy
-  if (bass_ratio > 0.3f) {
-    hue = (uint16_t)(hue + (uint16_t)(bass_ratio * 60.0f));
-    if (hue > 255) {
-      hue = 255;
-    }
-  }
+  // Sweep the full 0-359 degree colour spectrum. Audio energy and bass move
+  // the hue within that sweep while RMS level controls brightness.
+  uint16_t sweep = (uint16_t)((esp_timer_get_time() / 20000) % 360);
+  uint16_t hue =
+      (uint16_t)((sweep + (uint16_t)(norm * 120.0f) +
+                  (uint16_t)(bass_ratio * 90.0f)) %
+                 360);
 
   // High saturation, reduce slightly at very high energy for warm white
   uint8_t sat = 255;
@@ -426,6 +439,15 @@ static void rgb_led_init(void) {
 }
 static void rgb_led_set_mode(led_mode_t mode) {
   (void)mode;
+}
+static void rgb_led_stop_blink(void) {
+}
+static void rgb_led_start_blink(uint8_t r, uint8_t g, uint8_t b,
+                                uint32_t period_ms) {
+  (void)r;
+  (void)g;
+  (void)b;
+  (void)period_ms;
 }
 static void rgb_led_set_color(uint8_t r, uint8_t g, uint8_t b) {
   (void)r;
@@ -453,9 +475,29 @@ typedef enum {
 
 static led_state_t s_prev_state = STATE_STANDBY;
 static led_state_t s_current_state = STATE_STANDBY;
+static led_wifi_state_t s_wifi_state = LED_WIFI_DISCONNECTED;
 
 static uint8_t scale_bright(uint8_t v) {
   return (uint8_t)((uint16_t)v * s_brightness / 255);
+}
+
+static void render_wifi_state(void) {
+  status_led_set_mode(LED_OFF);
+  switch (s_wifi_state) {
+  case LED_WIFI_DISCONNECTED:
+    // No saved network or all connection attempts failed: slow red flash.
+    rgb_led_start_blink(scale_bright(0xB0), 0, 0, 700);
+    break;
+  case LED_WIFI_CONNECTING:
+    // Association/authentication/DHCP acknowledgement: fast green flash.
+    rgb_led_start_blink(0, scale_bright(0xA0), 0, 150);
+    break;
+  case LED_WIFI_CONNECTED:
+    rgb_led_set_mode(LED_STEADY);
+    rgb_led_set_color(0, 0, scale_bright(0xC0));
+    break;
+  }
+  error_led_set(false);
 }
 
 static void render_state(led_state_t state) {
@@ -467,36 +509,15 @@ static void render_state(led_state_t state) {
     break;
 
   case STATE_PAUSED:
-    status_led_set_mode(get_status_mode_paused());
-    rgb_led_set_mode(get_rgb_mode_paused());
-    if (get_rgb_mode_paused() == LED_STEADY) {
-#ifdef CONFIG_LED_RGB_COLOR_PAUSED
-      uint32_t c = CONFIG_LED_RGB_COLOR_PAUSED;
-      rgb_led_set_color(scale_bright((c >> 16) & 0xFF),
-                        scale_bright((c >> 8) & 0xFF), scale_bright(c & 0xFF));
-#else
-      rgb_led_set_color(0, 0, scale_bright(0x33));
-#endif
-    }
-    error_led_set(false);
+    render_wifi_state();
     break;
 
   case STATE_STANDBY:
-    status_led_set_mode(get_status_mode_standby());
-    rgb_led_set_mode(get_rgb_mode_standby());
-    if (get_rgb_mode_standby() == LED_STEADY) {
-#ifdef CONFIG_LED_RGB_COLOR_STANDBY
-      uint32_t c = CONFIG_LED_RGB_COLOR_STANDBY;
-      rgb_led_set_color(scale_bright((c >> 16) & 0xFF),
-                        scale_bright((c >> 8) & 0xFF), scale_bright(c & 0xFF));
-#else
-      rgb_led_set_color(0, scale_bright(0x11), 0);
-#endif
-    }
-    error_led_set(false);
+    render_wifi_state();
     break;
 
   case STATE_ERROR:
+    rgb_led_stop_blink();
 #if CONFIG_LED_ERROR_GPIO >= 0
     // Dedicated error LED - turn off status to avoid mixed signals
     status_led_set_mode(LED_OFF);
@@ -639,6 +660,24 @@ void led_set_error(bool error) {
     }
   } else if (s_current_state == STATE_ERROR) {
     apply_state(s_prev_state);
+  }
+}
+
+void led_set_wifi_state(led_wifi_state_t state) {
+  if (state == s_wifi_state) {
+    return;
+  }
+  ESP_LOGI(TAG, "Wi-Fi LED state: %d -> %d", s_wifi_state, state);
+  s_wifi_state = state;
+  if (s_current_state == STATE_ERROR) {
+    return;
+  }
+  if (state != LED_WIFI_CONNECTED) {
+    // Network loss/association has priority because audio cannot remain valid
+    // without the transport.
+    render_wifi_state();
+  } else {
+    render_state(s_current_state);
   }
 }
 

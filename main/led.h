@@ -14,6 +14,12 @@ typedef enum {
   LED_VU,           // Audio visualization
 } led_mode_t;
 
+typedef enum {
+  LED_WIFI_DISCONNECTED,
+  LED_WIFI_CONNECTING,
+  LED_WIFI_CONNECTED,
+} led_wifi_state_t;
+
 /**
  * Initialize LED subsystem and register for RTSP events.
  */
@@ -30,6 +36,12 @@ void led_audio_feed(const int16_t *pcm, size_t stereo_samples);
  * Clears automatically on next playback state change.
  */
 void led_set_error(bool error);
+
+/**
+ * Update the RGB LED's Wi-Fi indication. Playback has priority and temporarily
+ * replaces this indication with the audio-reactive spectrum.
+ */
+void led_set_wifi_state(led_wifi_state_t state);
 
 /**
  * Set LED brightness (0–255). Persists to NVS and takes effect immediately.
