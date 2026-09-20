@@ -165,6 +165,7 @@ static struct {
   uint32_t duration_secs;
   uint32_t position_secs;
   display_state_t state;
+  bool dlna_active;
   volatile bool dirty;  // written by RTSP callback, polled by display_task
   int64_t sync_time_us; // 64-bit — torn reads would cause position jumps
 } s_display;
@@ -794,6 +795,7 @@ static void ui_update(void) {
   uint32_t position_secs;
   int64_t sync_time_us;
   display_state_t state;
+  bool dlna_active;
   uint8_t *pending_artwork = NULL;
   size_t pending_artwork_len = 0;
   uint16_t pending_artwork_width = 0;
@@ -810,6 +812,7 @@ static void ui_update(void) {
   position_secs = s_display.position_secs;
   sync_time_us = s_display.sync_time_us;
   state = s_display.state;
+  dlna_active = s_display.dlna_active;
   clear_artwork = s_artwork_clear_requested;
   s_artwork_clear_requested = false;
   if (s_artwork_pending_ready) {
@@ -833,12 +836,9 @@ static void ui_update(void) {
   album[METADATA_STRING_MAX - 1] = '\0';
   sender[sizeof(sender) - 1] = '\0';
 
-  // Query and show the associated Wi-Fi network only while the receiver is
-  // idle.  Once an AirPlay client connects, use its sender identity instead;
-  // never leak the router SSID into the playing/paused metadata view.
-  if (state == DISPLAY_STATE_STANDBY) {
-    wifi_status_text(wifi_text, sizeof(wifi_text));
-  }
+  // Keep Wi-Fi status polling identical to R44. The SSID is still rendered
+  // only by the idle AirPlay screen, so it cannot replace active sender data.
+  wifi_status_text(wifi_text, sizeof(wifi_text));
 
   if (!lvgl_port_lock(100)) {
     ESP_LOGW(TAG, "ui_update: lock timeout");
@@ -876,9 +876,18 @@ static void ui_update(void) {
 
   switch (state) {
   case DISPLAY_STATE_STANDBY:
-    lv_label_set_text(s_label_title, "AirPlay Ready");
-    lv_label_set_text(s_label_artist, wifi_text);
-    lv_label_set_text(s_label_album, "");
+    if (dlna_active) {
+      lv_label_set_text(s_label_title, "DLNA");
+      lv_label_set_text(s_label_artist,
+                        title[0] ? title : "Media selected");
+      lv_label_set_text(s_label_album,
+                        artist[0] ? artist
+                                  : (album[0] ? album : "Ready to play"));
+    } else {
+      lv_label_set_text(s_label_title, "AirPlay Ready");
+      lv_label_set_text(s_label_artist, wifi_text);
+      lv_label_set_text(s_label_album, "");
+    }
     lv_label_set_text(s_label_status, "");
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
@@ -910,18 +919,30 @@ static void ui_update(void) {
   case DISPLAY_STATE_PAUSED: {
     lv_label_set_text(s_label_title,
                       title[0] ? title
-                               : (state == DISPLAY_STATE_PAUSED
-                                      ? "AirPlay Paused"
-                                      : "AirPlay Playing"));
+                               : (dlna_active
+                                      ? "DLNA"
+                                      : (state == DISPLAY_STATE_PAUSED
+                                             ? "AirPlay Paused"
+                                             : "AirPlay Playing")));
     lv_label_set_text(s_label_artist,
                       artist[0] ? artist
-                                : (sender[0] ? sender
-                                             : "Waiting for track details..."));
+                                : (dlna_active
+                                       ? "DLNA"
+                                       : (sender[0]
+                                              ? sender
+                                              : "Waiting for track details...")));
     lv_label_set_text(s_label_album,
                       album[0] ? album
-                               : (sender[0] ? sender : "AirPlay sender"));
+                               : (dlna_active
+                                      ? "DLNA"
+                                      : (sender[0] ? sender
+                                                   : "AirPlay sender")));
     lv_label_set_text(s_label_status,
-                      state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+                      dlna_active
+                          ? (state == DISPLAY_STATE_PAUSED ? "DLNA PAUSED"
+                                                           : "DLNA PLAYING")
+                          : (state == DISPLAY_STATE_PAUSED ? "PAUSED"
+                                                           : "PLAYING"));
 
     // Muted indicator
     if (playback_control_is_muted()) {
@@ -1004,6 +1025,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     ++s_artwork_generation;
 #endif
     s_display.state = DISPLAY_STATE_CONNECTED;
+    s_display.dlna_active = false;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
     memset(s_display.album, 0, sizeof(s_display.album));
@@ -1040,6 +1062,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
     ++s_artwork_generation;
 #endif
     s_display.state = DISPLAY_STATE_STANDBY;
+    s_display.dlna_active = false;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
     memset(s_display.album, 0, sizeof(s_display.album));
@@ -1134,6 +1157,26 @@ void display_notify_stopped(void) {
     return;
   }
   on_rtsp_event(RTSP_EVENT_DISCONNECTED, NULL, NULL);
+}
+
+void display_notify_dlna_active(bool active) {
+  if (!s_state_mutex) {
+    return;
+  }
+
+  STATE_LOCK();
+  if (s_display.dlna_active != active) {
+    s_display.dlna_active = active;
+    if (active) {
+      memset(s_display.sender, 0, sizeof(s_display.sender));
+      s_artwork_clear_requested = true;
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+      ++s_artwork_generation;
+#endif
+    }
+    s_display.dirty = true;
+  }
+  STATE_UNLOCK();
 }
 
 void display_notify_airplay_sender(const char *sender_name) {

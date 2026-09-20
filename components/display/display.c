@@ -34,6 +34,7 @@ static struct {
   uint32_t duration_secs;
   uint32_t position_secs;
   display_state_t state;
+  bool dlna_active;
   bool dirty;           // set by event callback, cleared by render
   int64_t sync_time_us; // esp_timer_get_time() when position was last synced
 } s_display;
@@ -193,9 +194,11 @@ static void display_render(void) {
   case DISPLAY_STATE_STANDBY:
     u8g2_SetFont(&s_u8g2, u8g2_font_7x14_tf);
 #if defined(CONFIG_DISPLAY_HEIGHT_32)
-    u8g2_DrawUTF8(&s_u8g2, 0, 20, "AirPlay Ready");
+    u8g2_DrawUTF8(&s_u8g2, 0, 20,
+                  s_display.dlna_active ? "DLNA" : "AirPlay Ready");
 #else
-    u8g2_DrawUTF8(&s_u8g2, 0, 32, "AirPlay Ready");
+    u8g2_DrawUTF8(&s_u8g2, 0, 32,
+                  s_display.dlna_active ? "DLNA" : "AirPlay Ready");
 #endif
     break;
 
@@ -281,6 +284,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
   switch (event) {
   case RTSP_EVENT_CLIENT_CONNECTED:
     s_display.state = DISPLAY_STATE_CONNECTED;
+    s_display.dlna_active = false;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
     memset(s_display.album, 0, sizeof(s_display.album));
@@ -307,6 +311,7 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
 
   case RTSP_EVENT_DISCONNECTED:
     s_display.state = DISPLAY_STATE_STANDBY;
+    s_display.dlna_active = false;
     memset(s_display.title, 0, sizeof(s_display.title));
     memset(s_display.artist, 0, sizeof(s_display.artist));
     memset(s_display.album, 0, sizeof(s_display.album));
@@ -379,6 +384,12 @@ void display_notify_playback(bool paused) {
 
 void display_notify_stopped(void) {
   on_rtsp_event(RTSP_EVENT_DISCONNECTED, NULL, NULL);
+}
+
+void display_notify_dlna_active(bool active) {
+  s_display.dlna_active = active;
+  s_display.dirty = true;
+  scroll_reset();
 }
 
 // ============================================================================
