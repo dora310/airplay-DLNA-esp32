@@ -39,6 +39,15 @@ void display_notify_playback(bool paused);
 void display_notify_stopped(void);
 
 /**
+ * Select or clear the DLNA display mode.
+ *
+ * DLNA controllers do not keep a persistent connection, so the renderer calls
+ * this when media is selected/started and clears it when playback ends or
+ * AirPlay takes ownership.
+ */
+void display_notify_dlna_active(bool active);
+
+/**
  * Update the friendly identity of the currently connected AirPlay sender.
  * The supplied string is copied immediately and may be temporary storage.
  */
@@ -65,6 +74,8 @@ static inline void display_notify_metadata(const char *title,
 static inline void display_notify_playback(bool paused) { (void)paused; }
 
 static inline void display_notify_stopped(void) {}
+
+static inline void display_notify_dlna_active(bool active) { (void)active; }
 
 static inline void display_notify_airplay_sender(const char *sender_name) {
   (void)sender_name;
