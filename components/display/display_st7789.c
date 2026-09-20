@@ -895,58 +895,78 @@ static void ui_update(void) {
     lv_obj_add_flag(s_label_muted, LV_OBJ_FLAG_HIDDEN);
     break;
 
-  case DISPLAY_STATE_CONNECTED:
+  case DISPLAY_STATE_CONNECTED: {
+    char connected_status[64];
+
     // Metadata can arrive before RECORD/SETRATEANCHORTIME changes the state
     // to PLAYING. Render it immediately instead of hiding it behind the fixed
     // Connected/Ready message.
     lv_label_set_text(s_label_title,
                       title[0] ? title : "AirPlay Connected");
     lv_label_set_text(s_label_artist,
-                      artist[0] ? artist
-                                : (sender[0] ? sender
-                                             : "Waiting for track details..."));
+                      artist[0] ? artist : wifi_text);
     lv_label_set_text(s_label_album,
                       album[0] ? album : "Waiting for music...");
-    lv_label_set_text(s_label_status, "");
+    if (sender[0]) {
+      snprintf(connected_status, sizeof(connected_status), "%.24s | CONNECTED",
+               sender);
+    } else {
+      snprintf(connected_status, sizeof(connected_status), "CONNECTED");
+    }
+    lv_label_set_text(s_label_status, connected_status);
     lv_label_set_text(s_label_time_elapsed, "");
     lv_label_set_text(s_label_time_remaining, "");
     lv_bar_set_value(s_bar_progress, 0, LV_ANIM_OFF);
     lv_obj_add_flag(s_label_muted, LV_OBJ_FLAG_HIDDEN);
     break;
+  }
 
   case DISPLAY_STATE_PLAYING:
   case DISPLAY_STATE_PAUSED: {
     char playback_status[64];
+    bool airplay_waiting = !dlna_active && title[0] == '\0' &&
+                           artist[0] == '\0' && album[0] == '\0' &&
+                           duration_secs == 0;
 
     lv_label_set_text(s_label_title,
-                      title[0] ? title
+                      airplay_waiting
+                          ? "AirPlay Connected"
+                          : (title[0] ? title
                                : (dlna_active
                                       ? "DLNA"
                                       : (state == DISPLAY_STATE_PAUSED
                                              ? "AirPlay Paused"
-                                             : "AirPlay Playing")));
+                                             : "AirPlay Playing"))));
     lv_label_set_text(s_label_artist,
-                      artist[0] ? artist
+                      airplay_waiting
+                          ? wifi_text
+                          : (artist[0] ? artist
                                 : (dlna_active
                                        ? "DLNA"
                                        : (sender[0]
                                               ? sender
-                                              : "Waiting for track details...")));
+                                              : "Waiting for track details..."))));
     lv_label_set_text(s_label_album,
-                      album[0] ? album
+                      airplay_waiting
+                          ? "Waiting for music..."
+                          : (album[0] ? album
                                : (dlna_active
                                       ? "DLNA"
-                                      : "Waiting for track details..."));
+                                      : "Waiting for track details...")));
 
     if (dlna_active) {
       snprintf(playback_status, sizeof(playback_status), "DLNA %s",
                state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
     } else if (sender[0]) {
       snprintf(playback_status, sizeof(playback_status), "%.24s | %s", sender,
-               state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+               airplay_waiting
+                   ? "CONNECTED"
+                   : (state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING"));
     } else {
       snprintf(playback_status, sizeof(playback_status), "%s",
-               state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING");
+               airplay_waiting
+                   ? "CONNECTED"
+                   : (state == DISPLAY_STATE_PAUSED ? "PAUSED" : "PLAYING"));
     }
     lv_label_set_text(s_label_status, playback_status);
 
